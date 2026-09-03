@@ -1,0 +1,284 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountState {
+  ACTIVE
+  NEEDS_REAUTH
+  PAUSED
+  BLOCKED
+  DELETING
+}
+
+enum SyncStatus {
+  IDLE
+  RUNNING
+  BACKOFF
+  NEEDS_REAUTH
+  PAUSED
+}
+
+enum SyncOutcome {
+  SUCCEEDED
+  FAILED
+  RATE_LIMITED
+  SKIPPED
+  PARTIAL
+}
+
+enum HistorySource {
+  SPOTIFY_API
+  IMPORT
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  status         String    @default("ACTIVE")
+  consentVersion String?   @map("consent_version")
+  consentedAt    DateTime? @map("consented_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  spotifyAccount SpotifyAccount?
+  settings       UserSettings?
+  sessions       AppSession[]
+  oauthStates    OAuthState[]
+
+  @@index([status])
+  @@map("users")
+}
+
+model SpotifyAccount {
+  id                    String       @id @default(uuid()) @db.Uuid
+  userId                String       @unique @map("user_id") @db.Uuid
+  spotifyAccountId      String       @unique @map("spotify_account_id")
+  displayName           String?      @map("display_name")
+  accessTokenEnvelope   Json         @map("access_token_envelope")
+  refreshTokenEnvelope  Json         @map("refresh_token_envelope")
+  accessTokenExpiresAt  DateTime     @map("access_token_expires_at") @db.Timestamptz(6)
+  refreshTokenExpiresAt DateTime     @map("refresh_token_expires_at") @db.Timestamptz(6)
+  scopes                String[]
+  state                 AccountState @default(ACTIVE)
+  authorizedAt          DateTime     @default(now()) @map("authorized_at") @db.Timestamptz(6)
+  updatedAt             DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history   ListeningHistory[]
+  syncState SyncState?
+  syncRuns  SyncRun[]
+
+  @@index([state, refreshTokenExpiresAt])
+  @@map("spotify_accounts")
+}
+
+model UserSettings {
+  userId        String @id @map("user_id") @db.Uuid
+  timezone      String @default("UTC")
+  weekStartsOn  Int    @default(1) @map("week_starts_on")
+  defaultRange  String @default("LAST_30_DAYS") @map("default_range")
+  theme         String @default("SYSTEM")
+  retentionDays Int    @default(730) @map("retention_days")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+model AppSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  csrfHash   String    @map("csrf_hash")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  idleAt     DateTime  @map("idle_at") @db.Timestamptz(6)
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  authAt     DateTime  @default(now()) @map("auth_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("app_sessions")
+}
+
+model OAuthState {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String?   @map("user_id") @db.Uuid
+  stateHash  String    @unique @map("state_hash")
+  returnPath String?   @map("return_path")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt     DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("oauth_states")
+}
+
+model Artist {
+  id                String   @id @default(uuid()) @db.Uuid
+  externalKey       String   @unique @map("external_key")
+  spotifyId         String?  @unique @map("spotify_id")
+  name              String
+  normalizedName    String   @map("normalized_name")
+  spotifyUri        String?  @map("spotify_uri")
+  imageUrl          String?  @map("image_url")
+  metadataFetchedAt DateTime @map("metadata_fetched_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tracks TrackArtist[]
+  albums AlbumArtist[]
+
+  @@index([normalizedName])
+  @@map("artists")
+}
+
+model Album {
+  id                   String   @id @default(uuid()) @db.Uuid
+  externalKey          String   @unique @map("external_key")
+  spotifyId            String?  @unique @map("spotify_id")
+  name                 String
+  normalizedName       String   @map("normalized_name")
+  albumType            String?  @map("album_type")
+  releaseDateText      String?  @map("release_date_text")
+  releaseDatePrecision String?  @map("release_date_precision")
+  releaseYear          Int?     @map("release_year")
+  spotifyUri           String?  @map("spotify_uri")
+  artworkUrl           String?  @map("artwork_url")
+  metadataFetchedAt    DateTime @map("metadata_fetched_at") @db.Timestamptz(6)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tracks  Track[]
+  artists AlbumArtist[]
+
+  @@index([normalizedName])
+  @@index([releaseYear])
+  @@map("albums")
+}
+
+model AlbumArtist {
+  albumId  String @map("album_id") @db.Uuid
+  artistId String @map("artist_id") @db.Uuid
+  position Int
+
+  album  Album  @relation(fields: [albumId], references: [id], onDelete: Cascade)
+  artist Artist @relation(fields: [artistId], references: [id], onDelete: Cascade)
+
+  @@id([albumId, artistId])
+  @@unique([albumId, position])
+  @@index([artistId])
+  @@map("album_artists")
+}
+
+model Track {
+  id                String   @id @default(uuid()) @db.Uuid
+  externalKey       String   @unique @map("external_key")
+  spotifyId         String?  @unique @map("spotify_id")
+  albumId           String?  @map("album_id") @db.Uuid
+  name              String
+  normalizedName    String   @map("normalized_name")
+  durationMs        Int      @map("duration_ms")
+  discNumber        Int?     @map("disc_number")
+  trackNumber       Int?     @map("track_number")
+  explicit          Boolean  @default(false)
+  isLocal           Boolean  @default(false) @map("is_local")
+  spotifyUri        String?  @map("spotify_uri")
+  isrc              String?
+  metadataFetchedAt DateTime @map("metadata_fetched_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  album   Album?             @relation(fields: [albumId], references: [id], onDelete: SetNull)
+  artists TrackArtist[]
+  history ListeningHistory[]
+
+  @@index([albumId])
+  @@index([normalizedName])
+  @@index([isrc])
+  @@map("tracks")
+}
+
+model TrackArtist {
+  trackId  String @map("track_id") @db.Uuid
+  artistId String @map("artist_id") @db.Uuid
+  position Int
+
+  track  Track  @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  artist Artist @relation(fields: [artistId], references: [id], onDelete: Cascade)
+
+  @@id([trackId, artistId])
+  @@unique([trackId, position])
+  @@index([artistId])
+  @@map("track_artists")
+}
+
+model ListeningHistory {
+  id                  String        @id @default(uuid()) @db.Uuid
+  spotifyAccountId    String        @map("spotify_account_id") @db.Uuid
+  trackId             String        @map("track_id") @db.Uuid
+  playedAt            DateTime      @map("played_at") @db.Timestamptz(6)
+  estimatedDurationMs Int           @map("estimated_duration_ms")
+  source              HistorySource @default(SPOTIFY_API)
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  spotifyAccount SpotifyAccount @relation(fields: [spotifyAccountId], references: [id], onDelete: Cascade)
+  track          Track          @relation(fields: [trackId], references: [id], onDelete: Restrict)
+
+  @@unique([spotifyAccountId, trackId, playedAt])
+  @@index([spotifyAccountId, playedAt(sort: Desc), id(sort: Desc)])
+  @@index([spotifyAccountId, trackId, playedAt(sort: Desc)])
+  @@map("listening_history")
+}
+
+model SyncState {
+  spotifyAccountId    String     @id @map("spotify_account_id") @db.Uuid
+  status              SyncStatus @default(IDLE)
+  cursorPlayedAt      DateTime?  @map("cursor_played_at") @db.Timestamptz(6)
+  nextSyncAt          DateTime   @default(now()) @map("next_sync_at") @db.Timestamptz(6)
+  lastAttemptAt       DateTime?  @map("last_attempt_at") @db.Timestamptz(6)
+  lastSuccessAt       DateTime?  @map("last_success_at") @db.Timestamptz(6)
+  lastManualSyncAt    DateTime?  @map("last_manual_sync_at") @db.Timestamptz(6)
+  consecutiveFailures Int        @default(0) @map("consecutive_failures")
+  probableGap         Boolean    @default(false) @map("probable_gap")
+  gapDetectedAt       DateTime?  @map("gap_detected_at") @db.Timestamptz(6)
+  gapReason           String?    @map("gap_reason")
+  leaseOwner          String?    @map("lease_owner")
+  leaseExpiresAt      DateTime?  @map("lease_expires_at") @db.Timestamptz(6)
+  workerHeartbeatAt   DateTime?  @map("worker_heartbeat_at") @db.Timestamptz(6)
+
+  spotifyAccount SpotifyAccount @relation(fields: [spotifyAccountId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextSyncAt])
+  @@index([leaseExpiresAt])
+  @@map("sync_state")
+}
+
+model SyncRun {
+  id               String      @id @default(uuid()) @db.Uuid
+  spotifyAccountId String      @map("spotify_account_id") @db.Uuid
+  startedAt        DateTime    @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt       DateTime?   @map("finished_at") @db.Timestamptz(6)
+  outcome          SyncOutcome
+  pagesFetched     Int         @default(0) @map("pages_fetched")
+  itemsFetched     Int         @default(0) @map("items_fetched")
+  eventsInserted   Int         @default(0) @map("events_inserted")
+  duplicates       Int         @default(0)
+  errorClass       String?     @map("error_class")
+  requestId        String      @map("request_id")
+
+  spotifyAccount SpotifyAccount @relation(fields: [spotifyAccountId], references: [id], onDelete: Cascade)
+
+  @@index([spotifyAccountId, startedAt(sort: Desc)])
+  @@map("sync_runs")
+}
