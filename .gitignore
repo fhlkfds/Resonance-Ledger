@@ -15,3 +15,7 @@ token-key*
 *.log
 .DS_Store
 *.tsbuildinfo
+
+# Runtime artifacts created by scripts/deploy.sh
+.deploy.lock
+.deploy.lock.d/
