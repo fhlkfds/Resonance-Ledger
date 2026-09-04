@@ -14,15 +14,33 @@ const tokenResponseSchema = z.object({
   scope: z.string(),
 });
 
+/**
+ * Spotify returns the immutable user key on /v1/me as `id`. `account_id` is
+ * not part of that body; it is accepted only as an alias so fixtures and
+ * proxies that emit the older name keep parsing. A body carrying neither key
+ * fails closed.
+ */
 const profileSchema = z
   .object({
-    account_id: z.string().min(1),
+    id: z.string().min(1).optional(),
+    account_id: z.string().min(1).optional(),
     display_name: z.string().nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine((profile) => Boolean(profile.id ?? profile.account_id), {
+    message: 'Spotify profile is missing the account key',
+    path: ['id'],
+  });
 
 export type SpotifyTokenResponse = z.infer<typeof tokenResponseSchema>;
 export type SpotifyProfile = z.infer<typeof profileSchema>;
+
+/** The immutable provider key to store as `spotifyAccountId`. */
+export function spotifyAccountKey(profile: SpotifyProfile): string {
+  const key = profile.id ?? profile.account_id;
+  if (!key) throw new Error('Spotify profile is missing the account key');
+  return key;
+}
 
 export function spotifyAuthorizationUrl(input: {
   clientId: string;

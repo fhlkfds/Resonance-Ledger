@@ -10,6 +10,7 @@ import {
 import {
   exchangeAuthorizationCode,
   fetchSpotifyProfile,
+  spotifyAccountKey,
   spotifyAuthorizationUrl,
 } from '@/lib/auth/spotify-oauth';
 
@@ -102,20 +103,18 @@ describe('Spotify OAuth boundary', () => {
     );
   });
 
-  it('links from immutable account_id', async () => {
+  it('links from the immutable id the provider actually returns', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
-          account_id: 'immutable-account',
-          id: 'deprecated-id',
+          id: 'immutable-account',
           display_name: 'Listener',
         }),
         { status: 200 },
       ),
     );
-    await expect(
-      fetchSpotifyProfile('access-secret', fetcher),
-    ).resolves.toMatchObject({ account_id: 'immutable-account' });
+    const profile = await fetchSpotifyProfile('access-secret', fetcher);
+    expect(spotifyAccountKey(profile)).toBe('immutable-account');
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   exchangeAuthorizationCode,
   fetchSpotifyProfile,
+  spotifyAccountKey,
 } from '@/lib/auth/spotify-oauth';
 
 /**
@@ -94,14 +95,12 @@ describe('authorization code exchange', () => {
 
 describe('current profile', () => {
   it('sends a bearer token and a descriptive user agent', async () => {
-    const fetcher = vi.fn(async () =>
-      jsonResponse({ id: 'legacy-id', account_id: 'immutable-id' }),
-    );
+    const fetcher = vi.fn(async () => jsonResponse({ id: 'immutable-id' }));
     const profile = await fetchSpotifyProfile(
       'access-value',
       fetcher as unknown as typeof fetch,
     );
-    expect(profile.account_id ?? profile.id).toBeTruthy();
+    expect(spotifyAccountKey(profile)).toBe('immutable-id');
     const [url, init] = fetcher.mock.calls[0] as unknown as [
       string,
       RequestInit,
@@ -119,10 +118,37 @@ describe('current profile', () => {
     ).rejects.toThrow(/status 401/);
   });
 
-  it('never requests the email scope', async () => {
+  // C1: the real /v1/me body carries `id` and no `account_id`. Requiring
+  // `account_id` made every production login fail closed.
+  it('parses a profile that carries only the real `id` field', async () => {
     const fetcher = vi.fn(async () =>
-      jsonResponse({ id: 'legacy-id', account_id: 'immutable-id' }),
+      jsonResponse({ id: 'real-spotify-id', display_name: 'Listener' }),
     );
+    const profile = await fetchSpotifyProfile(
+      'access-value',
+      fetcher as unknown as typeof fetch,
+    );
+    expect(spotifyAccountKey(profile)).toBe('real-spotify-id');
+  });
+
+  it('accepts `account_id` as an alias when `id` is absent', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ account_id: 'alias-id' }));
+    const profile = await fetchSpotifyProfile(
+      'access-value',
+      fetcher as unknown as typeof fetch,
+    );
+    expect(spotifyAccountKey(profile)).toBe('alias-id');
+  });
+
+  it('fails closed when the profile carries neither key', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ display_name: 'Nobody' }));
+    await expect(
+      fetchSpotifyProfile('access-value', fetcher as unknown as typeof fetch),
+    ).rejects.toThrow();
+  });
+
+  it('never requests the email scope', async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ id: 'immutable-id' }));
     await fetchSpotifyProfile(
       'access-value',
       fetcher as unknown as typeof fetch,
@@ -153,9 +179,7 @@ describe('default fetch implementation', () => {
 
   it('uses the global fetch for the profile call too', async () => {
     const original = globalThis.fetch;
-    const stub = vi.fn(async () =>
-      jsonResponse({ id: 'legacy-id', account_id: 'immutable-id' }),
-    );
+    const stub = vi.fn(async () => jsonResponse({ id: 'immutable-id' }));
     globalThis.fetch = stub as unknown as typeof fetch;
     try {
       await fetchSpotifyProfile('access-value');

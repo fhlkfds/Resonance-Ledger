@@ -25,7 +25,8 @@ createServer((request, response) => {
   if (url.pathname === '/v1/me') {
     response.end(
       JSON.stringify({
-        account_id: 'resonance-e2e-account',
+        // Mirrors the real /v1/me body: the immutable key is `id` only.
+        id: 'resonance-e2e-account',
         display_name: 'E2E Listener',
       }),
     );

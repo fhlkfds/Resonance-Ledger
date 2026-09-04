@@ -16,6 +16,7 @@ import { createSession } from '@/lib/auth/sessions';
 import {
   exchangeAuthorizationCode,
   fetchSpotifyProfile,
+  spotifyAccountKey,
   SPOTIFY_SCOPES,
 } from '@/lib/auth/spotify-oauth';
 import { database } from '@/lib/db/client';
@@ -62,9 +63,10 @@ export async function GET(request: Request): Promise<NextResponse> {
       redirectUri: environment.SPOTIFY_REDIRECT_URI,
     });
     const profile = await fetchSpotifyProfile(tokens.access_token);
+    const accountKey = spotifyAccountKey(profile);
     const now = new Date();
     const existing = await database.spotifyAccount.findUnique({
-      where: { spotifyAccountId: profile.account_id },
+      where: { spotifyAccountId: accountKey },
     });
     if (state.userId && existing && existing.userId !== state.userId)
       return loginError(environment, 'account_already_linked');
@@ -101,11 +103,11 @@ export async function GET(request: Request): Promise<NextResponse> {
         )
       : tokenEnvelopeSchema.parse(existing!.refreshTokenEnvelope);
     await database.spotifyAccount.upsert({
-      where: { spotifyAccountId: profile.account_id },
+      where: { spotifyAccountId: accountKey },
       create: {
         id: accountId,
         userId: user.id,
-        spotifyAccountId: profile.account_id,
+        spotifyAccountId: accountKey,
         displayName: profile.display_name ?? null,
         accessTokenEnvelope: accessEnvelope,
         refreshTokenEnvelope: refreshEnvelope,
