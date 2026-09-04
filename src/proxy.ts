@@ -17,6 +17,11 @@ export function proxy(request: NextRequest) {
   ].join('; ');
   const headers = new Headers(request.headers);
   headers.set('x-nonce', nonce);
+  // Next discovers the nonce by parsing the CSP off the *request* headers and
+  // stamps it onto the script tags it emits. Setting it only on the response
+  // leaves every bundle unnonced, and 'strict-dynamic' makes 'self' inert, so
+  // all client JS is blocked. It must be set on both.
+  headers.set('Content-Security-Policy', csp);
   headers.set(
     'x-resonance-path',
     `${request.nextUrl.pathname}${request.nextUrl.search}`,

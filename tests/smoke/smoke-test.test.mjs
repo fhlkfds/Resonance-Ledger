@@ -8,11 +8,19 @@ const run = promisify(execFile);
 let server;
 let baseUrl;
 
+/**
+ * Flips the fixture between a correctly nonced page and the pre-H1 behaviour
+ * where Next emitted unnonced script tags. 'strict-dynamic' means an unnonced
+ * bundle is a blocked bundle, so the smoke script must reject that state.
+ */
+let nonceScriptTags = true;
+
 before(async () => {
   server = createServer((request, response) => {
+    const nonce = 'c21va2Utbm9uY2U=';
     response.setHeader(
       'content-security-policy',
-      "default-src 'self'; frame-ancestors 'none'",
+      `default-src 'self'; script-src 'self' 'nonce-${nonce}' 'strict-dynamic'; frame-ancestors 'none'`,
     );
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('referrer-policy', 'no-referrer');
@@ -38,7 +46,11 @@ before(async () => {
       response.setHeader('location', '/login');
       response.end();
     } else {
-      response.end('ok');
+      response.setHeader('content-type', 'text/html');
+      const attribute = nonceScriptTags ? ` nonce="${nonce}"` : '';
+      response.end(
+        `<!doctype html><html><body>ok<script${attribute} src="/_next/app.js"></script></body></html>`,
+      );
     }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -53,7 +65,20 @@ test('the unattended smoke script accepts the safe public contract', async () =>
     'scripts/smoke-test.mjs',
     baseUrl,
   ]);
-  assert.match(stdout, /all 8 smoke checks passed/);
+  assert.match(stdout, /all 9 smoke checks passed/);
+});
+
+test('the unattended smoke script rejects unnonced script tags', async () => {
+  nonceScriptTags = false;
+  try {
+    await assert.rejects(
+      run(process.execPath, ['scripts/smoke-test.mjs', baseUrl]),
+      (error) =>
+        error.code === 1 && /script tags lack the CSP nonce/.test(error.stdout),
+    );
+  } finally {
+    nonceScriptTags = true;
+  }
 });
 
 test('the unattended smoke script exits non-zero on a bad target', async () => {

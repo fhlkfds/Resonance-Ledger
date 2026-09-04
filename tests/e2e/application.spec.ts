@@ -185,6 +185,16 @@ test('fake OAuth covers dashboard, pagination, export, mobile, charts, and logou
 
   await page.goto('/settings');
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
+
+  // H1: a real onClick round trip. If the CSP nonce does not reach the
+  // rendered script tags, 'strict-dynamic' blocks every bundle, the page
+  // never hydrates, and this click produces no status text at all.
+  await page.getByRole('button', { name: 'Sync now' }).click();
+  await expect(page.getByRole('status').filter({ hasText: /\S/ })).toHaveCount(
+    1,
+    { timeout: 10_000 },
+  );
+
   const csrf = (await page.context().cookies()).find(
     (cookie) => cookie.name === 'resonance_csrf',
   )!.value;
@@ -197,4 +207,22 @@ test('fake OAuth covers dashboard, pagination, export, mobile, charts, and logou
   expect(logout.status()).toBe(204);
   await page.goto('/');
   await expect(page).toHaveURL(/\/login/);
+});
+
+test('every rendered script tag carries the CSP nonce', async ({ page }) => {
+  // H1: Next stamps the nonce onto its script tags only when it can read the
+  // Content-Security-Policy off the *request* headers.
+  const response = await page.goto('/login');
+  const csp = response!.headers()['content-security-policy'] ?? '';
+  const nonce = /'nonce-([^']+)'/.exec(csp)?.[1];
+  expect(nonce, 'CSP carries a nonce').toBeTruthy();
+  const unnonced = await page.evaluate(
+    (expected) =>
+      [...document.querySelectorAll('script')].filter(
+        (tag) => tag.getAttribute('nonce') !== expected,
+      ).length,
+    nonce,
+  );
+  expect(await page.locator('script').count()).toBeGreaterThan(0);
+  expect(unnonced).toBe(0);
 });

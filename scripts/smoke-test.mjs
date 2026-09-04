@@ -99,6 +99,25 @@ await check('security headers are present', async () => {
   return 'CSP, nosniff, referrer-policy';
 });
 
+await check('every script tag carries the CSP nonce', async () => {
+  // H1: with 'strict-dynamic' in script-src, 'self' is ignored, so an
+  // unnonced bundle is a blocked bundle and no client component works.
+  const response = await get('/login');
+  if (response.status !== 200) throw new Error(`status ${response.status}`);
+  const csp = response.headers.get('content-security-policy') ?? '';
+  const nonce = /'nonce-([^']+)'/.exec(csp)?.[1];
+  if (!nonce) throw new Error('CSP carries no nonce');
+  const html = await response.text();
+  const tags = html.match(/<script\b[^>]*>/g) ?? [];
+  if (tags.length === 0) throw new Error('page rendered no script tags');
+  const unnonced = tags.filter((tag) => !tag.includes(`nonce="${nonce}"`));
+  if (unnonced.length)
+    throw new Error(
+      `${unnonced.length} of ${tags.length} script tags lack the CSP nonce`,
+    );
+  return `${tags.length} script tags nonced`;
+});
+
 await check(
   'a state-changing route refuses a cross-origin caller',
   async () => {
