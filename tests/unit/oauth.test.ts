@@ -118,3 +118,89 @@ describe('Spotify OAuth boundary', () => {
     ).resolves.toMatchObject({ account_id: 'immutable-account' });
   });
 });
+
+describe('consent receipt rejection paths', () => {
+  const secret = Buffer.alloc(32, 7);
+  const now = new Date('2026-09-03T12:00:00Z');
+
+  it('rejects a missing or empty receipt', () => {
+    expect(verifyConsentReceipt(undefined, secret, now)).toBe(false);
+    expect(verifyConsentReceipt('', secret, now)).toBe(false);
+  });
+
+  it('rejects a receipt with the wrong number of parts', () => {
+    expect(verifyConsentReceipt('a.b.c', secret, now)).toBe(false);
+    expect(verifyConsentReceipt('a.b.c.d.e', secret, now)).toBe(false);
+  });
+
+  it('rejects an older consent version', () => {
+    const receipt = createConsentReceipt(secret, now);
+    const parts = receipt.split('.');
+    expect(
+      verifyConsentReceipt(
+        ['2020-01-01', parts[1], parts[2], parts[3]].join('.'),
+        secret,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects an empty nonce or signature segment', () => {
+    const parts = createConsentReceipt(secret, now).split('.');
+    expect(
+      verifyConsentReceipt(
+        [parts[0], parts[1], '', parts[3]].join('.'),
+        secret,
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      verifyConsentReceipt(
+        [parts[0], parts[1], parts[2], ''].join('.'),
+        secret,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a non-numeric issue time', () => {
+    const parts = createConsentReceipt(secret, now).split('.');
+    expect(
+      verifyConsentReceipt(
+        [parts[0], 'not-a-number', parts[2], parts[3]].join('.'),
+        secret,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a receipt issued in the future', () => {
+    const future = new Date(now.getTime() + 10 * 60_000);
+    const receipt = createConsentReceipt(secret, future);
+    expect(verifyConsentReceipt(receipt, secret, now)).toBe(false);
+  });
+
+  it('rejects a receipt past its one-hour lifetime', () => {
+    const receipt = createConsentReceipt(secret, now);
+    const justInside = new Date(now.getTime() + 59 * 60_000);
+    const justOutside = new Date(now.getTime() + 61 * 60_000);
+    expect(verifyConsentReceipt(receipt, secret, justInside)).toBe(true);
+    expect(verifyConsentReceipt(receipt, secret, justOutside)).toBe(false);
+  });
+
+  it('rejects a receipt signed with another secret', () => {
+    const receipt = createConsentReceipt(Buffer.alloc(32, 9), now);
+    expect(verifyConsentReceipt(receipt, secret, now)).toBe(false);
+  });
+
+  it('rejects a signature of the wrong length', () => {
+    const parts = createConsentReceipt(secret, now).split('.');
+    expect(
+      verifyConsentReceipt(
+        [parts[0], parts[1], parts[2], 'AAAA'].join('.'),
+        secret,
+        now,
+      ),
+    ).toBe(false);
+  });
+});

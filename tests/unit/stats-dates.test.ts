@@ -268,3 +268,81 @@ describe('T-017 empty ranges', () => {
     expect(enumerateBuckets(from, to, 'UTC', 'hour', 1)).toHaveLength(3);
   });
 });
+
+describe('bucket labels at every granularity', () => {
+  const instant = new Date('2026-03-08T14:30:00Z');
+
+  it('labels each granularity distinctly', () => {
+    expect(bucketLabel(instant, 'UTC', 'hour')).toBe('2026-03-08T14');
+    expect(bucketLabel(instant, 'UTC', 'day')).toBe('2026-03-08');
+    expect(bucketLabel(instant, 'UTC', 'week')).toBe('2026-03-08');
+    expect(bucketLabel(instant, 'UTC', 'month')).toBe('2026-03');
+    expect(bucketLabel(instant, 'UTC', 'year')).toBe('2026');
+  });
+
+  it('pads single-digit months and days', () => {
+    expect(bucketLabel(new Date('2026-01-05T00:00:00Z'), 'UTC', 'day')).toBe(
+      '2026-01-05',
+    );
+    expect(bucketLabel(new Date('2026-01-05T03:00:00Z'), 'UTC', 'hour')).toBe(
+      '2026-01-05T03',
+    );
+  });
+
+  it('starts hour, month, and year buckets on their boundary', () => {
+    expect(startOfBucket(instant, 'UTC', 'hour', 1).toISOString()).toBe(
+      '2026-03-08T14:00:00.000Z',
+    );
+    expect(startOfBucket(instant, 'UTC', 'month', 1).toISOString()).toBe(
+      '2026-03-01T00:00:00.000Z',
+    );
+    expect(startOfBucket(instant, 'UTC', 'year', 1).toISOString()).toBe(
+      '2026-01-01T00:00:00.000Z',
+    );
+  });
+
+  it('enumerates year buckets across a decade boundary', () => {
+    const labels = enumerateBuckets(
+      zonedPartsToUtc('UTC', 2029, 6, 1),
+      zonedPartsToUtc('UTC', 2031, 6, 1),
+      'UTC',
+      'year',
+      1,
+    ).map((date) => bucketLabel(date, 'UTC', 'year'));
+    expect(labels).toEqual(['2029', '2030', '2031']);
+  });
+});
+
+describe('remaining range presets', () => {
+  const settings = { timezone: 'UTC', weekStartsOn: 1 } as const;
+  const now = new Date('2026-03-15T12:00:00Z');
+
+  it('spans thirty local days inclusive of today', () => {
+    const range = resolveRange({ preset: 'LAST_30_DAYS', now, ...settings });
+    expect(range.from?.toISOString()).toBe('2026-02-14T00:00:00.000Z');
+    expect(range.to.toISOString()).toBe('2026-03-16T00:00:00.000Z');
+  });
+
+  it('starts the current month at the first local day', () => {
+    const range = resolveRange({ preset: 'CURRENT_MONTH', now, ...settings });
+    expect(range.from?.toISOString()).toBe('2026-03-01T00:00:00.000Z');
+    expect(range.to.toISOString()).toBe('2026-03-16T00:00:00.000Z');
+  });
+
+  it('starts the current year at 1 January', () => {
+    const range = resolveRange({ preset: 'CURRENT_YEAR', now, ...settings });
+    expect(range.from?.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+    expect(range.to.toISOString()).toBe('2026-03-16T00:00:00.000Z');
+  });
+
+  it('rejects an unknown timezone before computing anything', () => {
+    expect(() =>
+      resolveRange({
+        preset: 'TODAY',
+        now,
+        timezone: 'Mars/Olympus_Mons',
+        weekStartsOn: 1,
+      }),
+    ).toThrow(RangeError);
+  });
+});
