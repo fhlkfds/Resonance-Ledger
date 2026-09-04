@@ -30,6 +30,7 @@ import { decodeCursor, encodeCursor } from '@/lib/api/pagination';
 import { dashboardData, rankedEntities } from '@/lib/stats/queries';
 import { entityDetailData } from '@/lib/stats/entity-details';
 import { analyticsData } from '@/lib/stats/analytics';
+import { runRetention } from '@/worker/retention';
 import { resolveRange } from '@/lib/stats/dates';
 import { enforceRateLimit } from '@/lib/api/rate-limit';
 import { spotifyItem } from '../fixtures/spotify';
@@ -1200,5 +1201,303 @@ describe('T-015/T-017 golden statistics', () => {
     expect(empty.rankings.artists).toEqual([]);
     expect(empty.distributions.artists.denominator).toBe(0);
     expect(empty.distributions.artists.items).toEqual([]);
+  });
+});
+
+describe('T-023 retention', () => {
+  it('removes expired history, keeps referenced metadata, and purges orphans', async () => {
+    const envelope = {
+      version: 'v1',
+      ciphertext: 'fixture',
+      nonce: 'fixture',
+      tag: 'fixture',
+    };
+    const expiry = new Date('2027-09-03T00:00:00Z');
+    const now = new Date('2026-09-03T00:00:00Z');
+
+    // Retention is per user: 30 days here, 730 for the second user, so a
+    // single global cutoff would produce the wrong answer for one of them.
+    const [shortUser, longUser] = await Promise.all([
+      database.user.create({
+        data: {
+          status: 'ACTIVE',
+          settings: { create: { retentionDays: 30 } },
+        },
+      }),
+      database.user.create({
+        data: {
+          status: 'ACTIVE',
+          settings: { create: { retentionDays: 730 } },
+        },
+      }),
+    ]);
+    const [shortAccount, longAccount] = await Promise.all([
+      database.spotifyAccount.create({
+        data: {
+          userId: shortUser.id,
+          spotifyAccountId: 'retention-short',
+          accessTokenEnvelope: envelope,
+          refreshTokenEnvelope: envelope,
+          accessTokenExpiresAt: expiry,
+          refreshTokenExpiresAt: expiry,
+          scopes: [],
+        },
+      }),
+      database.spotifyAccount.create({
+        data: {
+          userId: longUser.id,
+          spotifyAccountId: 'retention-long',
+          accessTokenEnvelope: envelope,
+          refreshTokenEnvelope: envelope,
+          accessTokenExpiresAt: expiry,
+          refreshTokenExpiresAt: expiry,
+          scopes: [],
+        },
+      }),
+    ]);
+
+    const artist = await database.artist.create({
+      data: {
+        externalKey: 'spotify:retention-artist',
+        spotifyId: 'retention-artist',
+        name: 'Kept',
+        normalizedName: 'kept',
+        metadataFetchedAt: now,
+      },
+    });
+    const album = await database.album.create({
+      data: {
+        externalKey: 'spotify:retention-album',
+        spotifyId: 'retention-album',
+        name: 'Kept Album',
+        normalizedName: 'kept album',
+        metadataFetchedAt: now,
+      },
+    });
+    // sharedTrack stays referenced by the long-retention user, so it must
+    // survive even though the short-retention user's event is deleted.
+    const [sharedTrack, doomedTrack] = await Promise.all([
+      database.track.create({
+        data: {
+          externalKey: 'spotify:retention-shared',
+          spotifyId: 'retention-shared',
+          name: 'Shared',
+          normalizedName: 'shared',
+          durationMs: 1000,
+          albumId: album.id,
+          metadataFetchedAt: now,
+          artists: { create: [{ artistId: artist.id, position: 0 }] },
+        },
+      }),
+      database.track.create({
+        data: {
+          externalKey: 'spotify:retention-doomed',
+          spotifyId: 'retention-doomed',
+          name: 'Doomed',
+          normalizedName: 'doomed',
+          durationMs: 1000,
+          metadataFetchedAt: now,
+          artists: { create: [{ artistId: artist.id, position: 0 }] },
+        },
+      }),
+    ]);
+
+    const daysAgo = (days: number) =>
+      new Date(now.getTime() - days * 86_400_000);
+
+    await database.listeningHistory.createMany({
+      data: [
+        // Short user: one inside the 30-day window, two outside it.
+        {
+          spotifyAccountId: shortAccount.id,
+          trackId: sharedTrack.id,
+          playedAt: daysAgo(10),
+          estimatedDurationMs: 1000,
+        },
+        {
+          spotifyAccountId: shortAccount.id,
+          trackId: sharedTrack.id,
+          playedAt: daysAgo(31),
+          estimatedDurationMs: 1000,
+        },
+        {
+          spotifyAccountId: shortAccount.id,
+          trackId: doomedTrack.id,
+          playedAt: daysAgo(400),
+          estimatedDurationMs: 1000,
+        },
+        // Long user: 400 days is well inside a 730-day window.
+        {
+          spotifyAccountId: longAccount.id,
+          trackId: sharedTrack.id,
+          playedAt: daysAgo(400),
+          estimatedDurationMs: 1000,
+        },
+      ],
+    });
+
+    // Expired session, stale OAuth state, and an old sync run.
+    await database.appSession.create({
+      data: {
+        userId: shortUser.id,
+        tokenHash: 'retention-expired-session',
+        csrfHash: 'retention-expired-csrf',
+        expiresAt: daysAgo(2),
+        idleAt: daysAgo(2),
+      },
+    });
+    await database.appSession.create({
+      data: {
+        userId: longUser.id,
+        tokenHash: 'retention-live-session',
+        csrfHash: 'retention-live-csrf',
+        expiresAt: new Date(now.getTime() + 86_400_000),
+        idleAt: new Date(now.getTime() + 86_400_000),
+      },
+    });
+    await database.oAuthState.create({
+      data: {
+        stateHash: 'retention-stale-state',
+        expiresAt: daysAgo(3),
+      },
+    });
+    await database.syncRun.create({
+      data: {
+        spotifyAccountId: shortAccount.id,
+        startedAt: daysAgo(200),
+        outcome: 'SUCCEEDED',
+        requestId: 'retention-old-run',
+      },
+    });
+    await database.syncRun.create({
+      data: {
+        spotifyAccountId: shortAccount.id,
+        startedAt: daysAgo(5),
+        outcome: 'SUCCEEDED',
+        requestId: 'retention-recent-run',
+      },
+    });
+
+    const summary = await runRetention(database, {
+      syncRunRetentionDays: 90,
+      now,
+    });
+
+    // Two of the short user's three events expired; the long user's stayed.
+    expect(summary.historyDeleted).toBe(2);
+    const shortRemaining = await database.listeningHistory.findMany({
+      where: { spotifyAccountId: shortAccount.id },
+    });
+    expect(shortRemaining).toHaveLength(1);
+    expect(shortRemaining[0]!.playedAt).toEqual(daysAgo(10));
+    expect(
+      await database.listeningHistory.count({
+        where: { spotifyAccountId: longAccount.id },
+      }),
+    ).toBe(1);
+
+    // The shared track is still referenced, so it survives; the orphan does not.
+    expect(
+      await database.track.findUnique({ where: { id: sharedTrack.id } }),
+    ).not.toBeNull();
+    expect(
+      await database.track.findUnique({ where: { id: doomedTrack.id } }),
+    ).toBeNull();
+    // Its album and artist remain reachable through the surviving track.
+    expect(
+      await database.album.findUnique({ where: { id: album.id } }),
+    ).not.toBeNull();
+    expect(
+      await database.artist.findUnique({ where: { id: artist.id } }),
+    ).not.toBeNull();
+
+    // Expired session removed, live session kept.
+    expect(
+      await database.appSession.findUnique({
+        where: { tokenHash: 'retention-expired-session' },
+      }),
+    ).toBeNull();
+    expect(
+      await database.appSession.findUnique({
+        where: { tokenHash: 'retention-live-session' },
+      }),
+    ).not.toBeNull();
+
+    expect(
+      await database.oAuthState.findUnique({
+        where: { stateHash: 'retention-stale-state' },
+      }),
+    ).toBeNull();
+
+    const runs = await database.syncRun.findMany({
+      where: { spotifyAccountId: shortAccount.id },
+      select: { requestId: true },
+    });
+    expect(runs.map((run) => run.requestId)).toEqual(['retention-recent-run']);
+
+    // Running again is a no-op, proving the pass is idempotent.
+    const second = await runRetention(database, {
+      syncRunRetentionDays: 90,
+      now,
+    });
+    expect(second.historyDeleted).toBe(0);
+    expect(second.tracksPurged).toBe(0);
+  });
+
+  it('completes a deferred disconnection and flags one past the deadline', async () => {
+    const envelope = {
+      version: 'v1',
+      ciphertext: 'fixture',
+      nonce: 'fixture',
+      tag: 'fixture',
+    };
+    const expiry = new Date('2027-09-03T00:00:00Z');
+    const now = new Date('2026-09-03T00:00:00Z');
+
+    const user = await database.user.create({
+      data: { status: 'ACTIVE', settings: { create: {} } },
+    });
+    const account = await database.spotifyAccount.create({
+      data: {
+        userId: user.id,
+        spotifyAccountId: 'retention-deleting',
+        accessTokenEnvelope: envelope,
+        refreshTokenEnvelope: envelope,
+        accessTokenExpiresAt: expiry,
+        refreshTokenExpiresAt: expiry,
+        scopes: [],
+        state: 'DELETING',
+      },
+    });
+    await database.appSession.create({
+      data: {
+        userId: user.id,
+        tokenHash: 'retention-deleting-session',
+        csrfHash: 'retention-deleting-csrf',
+        expiresAt: new Date(now.getTime() + 86_400_000),
+        idleAt: new Date(now.getTime() + 86_400_000),
+      },
+    });
+
+    // Backdate the account so it is past the five-day contractual deadline.
+    await database.$executeRaw`
+      UPDATE spotify_accounts SET updated_at = ${new Date(now.getTime() - 6 * 86_400_000)}
+      WHERE id = ${account.id}::uuid`;
+
+    const summary = await runRetention(database, {
+      syncRunRetentionDays: 90,
+      now,
+    });
+
+    expect(summary.accountsDeleted).toBeGreaterThanOrEqual(1);
+    expect(summary.deletionsOverdue).toBeGreaterThanOrEqual(1);
+    expect(
+      await database.spotifyAccount.findUnique({ where: { id: account.id } }),
+    ).toBeNull();
+    const cleared = await database.user.findUniqueOrThrow({
+      where: { id: user.id },
+    });
+    expect(cleared.status).toBe('DISCONNECTED');
+    expect(cleared.deletedAt).not.toBeNull();
   });
 });

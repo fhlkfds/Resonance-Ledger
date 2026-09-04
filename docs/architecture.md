@@ -38,3 +38,21 @@ PostgreSQL is the only durable runtime store. The application stores normalized 
 - **The migrator is built from a generated minimal manifest.** Applying migrations needs only the Prisma CLI, Prisma Client, and the committed schema. Installing the full production tree pulled in Next, React, and ECharts and left a 1.4 GB one-shot image. `scripts/migrator-manifest.mjs` writes a manifest containing only the two Prisma packages, at the versions the repository manifest already pins.
 - **Server source maps are deleted from the final runtime stage.** They disclose the original source layout without helping an operator debug a production container.
 - **`npm run typecheck` runs `next typegen` first.** Route and page types such as `PageProps` are generated into `.next/types`; without the typegen step, a typecheck on a clean checkout fails even though the same command passes locally after a previous build.
+
+## Retention
+
+`src/worker/retention.ts` runs a daily pass from the worker tick, plus one pass
+shortly after start so an installation that was stopped for a while catches up
+without waiting a full day. Every step is bounded and idempotent.
+
+- History is deleted per user against that user's own `retentionDays`, not one
+  global constant, because retention is a user-visible setting. A non-positive
+  value is treated as the 730-day default rather than as perpetual retention.
+- Metadata is purged only after both history deletion and deferred account
+  deletion, in track then album then artist order, so a row orphaned by either
+  step is caught in the same pass.
+- An account left in `DELETING` is retried here. Passing the five-day
+  contractual deadline logs an operator-visible warning rather than failing
+  silently.
+- A failed retention pass is logged and retried on the next cycle; it never
+  stops synchronization.

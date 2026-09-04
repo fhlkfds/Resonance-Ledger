@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { Environment } from '@/lib/env';
 import { leaseNextDueAccount } from '@/lib/db/repositories/sync';
+import { logger } from '@/lib/observability/logger';
+import { runRetention } from './retention';
 import { syncLeasedAccount } from './sync-account';
+
+/** Retention runs once a day; the tick loop just checks whether it is due. */
+const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export async function runScheduler(
   database: PrismaClient,
@@ -10,7 +15,30 @@ export async function runScheduler(
   signal: AbortSignal,
 ): Promise<void> {
   const workerId = randomUUID();
+  // Run one pass shortly after start so a long-stopped installation catches up
+  // without waiting a full day.
+  let retentionDueAt = Date.now();
+
   while (!signal.aborted) {
+    if (Date.now() >= retentionDueAt) {
+      try {
+        await runRetention(database, {
+          syncRunRetentionDays: environment.SYNC_RUN_RETENTION_DAYS,
+        });
+      } catch (error) {
+        // A failed retention pass must not stop synchronization; the next
+        // pass retries, and the failure is operator-visible in the logs.
+        logger.error(
+          {
+            event: 'retention.failed',
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'retention pass failed and will be retried',
+        );
+      }
+      retentionDueAt = Date.now() + RETENTION_INTERVAL_MS;
+    }
+
     const lease = await leaseNextDueAccount(database, workerId);
     if (lease)
       await syncLeasedAccount(
