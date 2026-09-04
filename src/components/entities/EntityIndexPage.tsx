@@ -6,6 +6,7 @@ import { database } from '@/lib/db/client';
 import { ApiRepository } from '@/lib/db/repositories/api';
 import { normalizedRange } from '@/lib/api/ranges';
 import { rankedEntities } from '@/lib/stats/queries';
+import { DebouncedSearchInput } from '@/components/filters/DebouncedSearchInput';
 
 type Kind = 'track' | 'artist' | 'album';
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
@@ -85,12 +86,10 @@ export async function EntityIndexPage({
       <form className="grid gap-3 rounded-2xl border border-white/10 bg-panel p-4 sm:grid-cols-2 xl:grid-cols-[1fr_auto_auto_auto]">
         <label className="grid gap-1 text-sm">
           Search {definition.title.toLocaleLowerCase()}
-          <input
-            className="min-w-0 rounded-lg border border-white/15 bg-background px-3 py-2"
-            defaultValue={parsed.q}
-            maxLength={200}
-            name="q"
-            type="search"
+          <DebouncedSearchInput
+            defaultValue={parsed.q ?? ''}
+            key={parsed.q ?? ''}
+            label={`Search ${definition.title.toLocaleLowerCase()}`}
           />
         </label>
         <label className="grid gap-1 text-sm">

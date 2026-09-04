@@ -1,4 +1,9 @@
-import { recentlyPlayedPageSchemaV1, type SpotifyPlayedItem } from './schemas';
+import {
+  recentlyPlayedPageSchemaV1,
+  spotifyArtistsSchema,
+  spotifyTracksSchema,
+  type SpotifyPlayedItem,
+} from './schemas';
 
 import { apiOrigin } from './endpoints';
 
@@ -142,4 +147,44 @@ export async function fetchRecentlyPlayed(
     (left, right) => Date.parse(left.played_at) - Date.parse(right.played_at),
   );
   return { items: items.slice(0, 500), pagesFetched, bounded };
+}
+
+export async function fetchSpotifyMetadata(
+  accessToken: string,
+  trackIds: string[],
+  options: ClientOptions,
+) {
+  if (trackIds.length < 1 || trackIds.length > 50)
+    throw new RangeError('Metadata refresh requires 1 to 50 track IDs');
+  const tracksUrl = new URL('/v1/tracks', API_ORIGIN);
+  tracksUrl.searchParams.set('ids', trackIds.join(','));
+  const tracksResponse = await fetchWithPolicy(tracksUrl, accessToken, options);
+  const tracksText = await tracksResponse.response.text();
+  if (tracksText.length > 2_000_000)
+    throw new Error('Spotify track metadata payload exceeds size limit');
+  const tracks = spotifyTracksSchema.parse(JSON.parse(tracksText)).tracks;
+  const artistIds = [
+    ...new Set(
+      tracks.flatMap(
+        (track) =>
+          track?.artists.flatMap((artist) => (artist.id ? [artist.id] : [])) ??
+          [],
+      ),
+    ),
+  ].slice(0, 50);
+  if (!artistIds.length) return { tracks, artists: [] };
+  const artistsUrl = new URL('/v1/artists', API_ORIGIN);
+  artistsUrl.searchParams.set('ids', artistIds.join(','));
+  const artistsResponse = await fetchWithPolicy(
+    artistsUrl,
+    tracksResponse.token,
+    options,
+  );
+  const artistsText = await artistsResponse.response.text();
+  if (artistsText.length > 2_000_000)
+    throw new Error('Spotify artist metadata payload exceeds size limit');
+  return {
+    tracks,
+    artists: spotifyArtistsSchema.parse(JSON.parse(artistsText)).artists,
+  };
 }

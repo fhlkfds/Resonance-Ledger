@@ -58,8 +58,10 @@ export default async function StatisticsPage({
 }: {
   searchParams: Promise<{
     range?: string;
+    compare?: string;
     metric?: string;
     granularity?: string;
+    years?: string | string[];
   }>;
 }) {
   const session = await requireSession();
@@ -81,6 +83,18 @@ export default async function StatisticsPage({
     validGranularities.has(parameters.granularity as Granularity)
       ? (parameters.granularity as Granularity)
       : undefined;
+  const comparePreset =
+    parameters.compare && validRanges.has(parameters.compare as RangePreset)
+      ? (parameters.compare as RangePreset)
+      : undefined;
+  const years = (
+    typeof parameters.years === 'string' ? parameters.years : undefined
+  )
+    ?.split(',')
+    .filter((value) => /^\d{4}$/.test(value))
+    .map(Number)
+    .filter((value) => value >= 1970 && value <= 9999)
+    .slice(0, 20);
 
   const range = resolveRange({
     preset,
@@ -88,17 +102,30 @@ export default async function StatisticsPage({
     weekStartsOn: settings.weekStartsOn,
     now: new Date(),
   });
-  const data = await analyticsData(
-    database,
-    session.userId,
-    range,
-    settings.weekStartsOn,
-    {
+  const compareRange = comparePreset
+    ? resolveRange({
+        preset: comparePreset,
+        timezone: settings.timezone,
+        weekStartsOn: settings.weekStartsOn,
+        now: new Date(),
+      })
+    : undefined;
+  const [data, comparison] = await Promise.all([
+    analyticsData(database, session.userId, range, settings.weekStartsOn, {
       ...(requestedGranularity ? { granularity: requestedGranularity } : {}),
       rankingLimit: 10,
       distributionLimit: 8,
-    },
-  );
+      ...(years?.length ? { years } : {}),
+    }),
+    compareRange
+      ? analyticsData(
+          database,
+          session.userId,
+          compareRange,
+          settings.weekStartsOn,
+        )
+      : null,
+  ]);
 
   const time = points(data.time, metric);
   const hourly = points(data.hourly, metric);
@@ -120,8 +147,10 @@ export default async function StatisticsPage({
         </div>
         <StatisticsFilter
           range={preset}
+          compare={comparePreset ?? ''}
           metric={metric}
           granularity={requestedGranularity ?? 'auto'}
+          years={years?.join(',') ?? ''}
           timezone={settings.timezone}
         />
       </header>
@@ -146,6 +175,26 @@ export default async function StatisticsPage({
           hint="Each credited artist receives one credit per play, so collaborative totals overlap and must not be summed as plays."
         />
       </section>
+
+      {comparison && comparePreset ? (
+        <ChartPanel
+          title="Range comparison"
+          kind="column"
+          metric={metric}
+          categoryHeading="Range"
+          categories={[
+            preset.replaceAll('_', ' ').toLocaleLowerCase(),
+            comparePreset.replaceAll('_', ' ').toLocaleLowerCase(),
+          ]}
+          series={[
+            {
+              name: metricLabel[metric],
+              values: [data.totals[metric], comparison.totals[metric]],
+            },
+          ]}
+          description={`${metricLabel[metric]} side-by-side for the two selected ranges.`}
+        />
+      ) : null}
 
       <dl className="rounded-2xl border border-white/10 bg-panel/60 p-5 text-sm">
         <div className="flex flex-wrap gap-x-8 gap-y-2 text-muted">
@@ -201,6 +250,22 @@ export default async function StatisticsPage({
           note={`Week starts on ${weekday.categories[0] ?? 'Monday'}.`}
         />
       </div>
+
+      <ChartPanel
+        title="Activity by hour and weekday"
+        kind="heatmap"
+        metric={metric}
+        categoryHeading="Local hour"
+        categories={Array.from({ length: 24 }, (_, hour) =>
+          hour.toString().padStart(2, '0'),
+        )}
+        series={data.hourWeekday.map((weekday) => ({
+          name: weekday.weekday,
+          values: weekday.points.map((point) => point[metric]),
+        }))}
+        description={`${metricLabel[metric]} by local hour and weekday in ${range.timezone}. Repeated DST hours are summed into the same cell.`}
+        height={380}
+      />
 
       <ChartPanel
         title="Activity by month"
@@ -309,7 +374,7 @@ export default async function StatisticsPage({
                   ] ?? 0,
               ),
           }))}
-          description={`${metricLabel[metric]} compared across ${yearOverYear.map((year) => year.year).join(', ')}. February 29 appears only in leap years.`}
+          description={`${metricLabel[metric]} compared across ${yearOverYear.map((year) => year.year).join(', ')}. February 29 is a separate bucket; non-leap years contribute zero.`}
           height={340}
         />
       ) : null}

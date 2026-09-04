@@ -29,13 +29,17 @@ const field = 'rounded-xl border border-white/15 bg-panel px-3 py-2 text-ink';
  */
 export function StatisticsFilter({
   range,
+  compare,
   metric,
   granularity,
+  years,
   timezone,
 }: {
   range: string;
+  compare: string;
   metric: string;
   granularity: string;
+  years: string;
   timezone: string;
 }) {
   return (
@@ -43,6 +47,17 @@ export function StatisticsFilter({
       <label className="grid gap-1 text-sm text-muted">
         Date range
         <select name="range" defaultValue={range} className={field}>
+          {ranges.map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="grid gap-1 text-sm text-muted">
+        Compare with
+        <select name="compare" defaultValue={compare} className={field}>
+          <option value="">None</option>
           {ranges.map(([value, label]) => (
             <option key={value} value={value}>
               {label}
@@ -59,6 +74,18 @@ export function StatisticsFilter({
             </option>
           ))}
         </select>
+      </label>
+      <label className="grid gap-1 text-sm text-muted">
+        Years
+        <input
+          className={field}
+          defaultValue={years}
+          inputMode="numeric"
+          maxLength={100}
+          name="years"
+          pattern="[0-9]{4}(,[0-9]{4})*"
+          placeholder="2024,2025,2026"
+        />
       </label>
       <label className="grid gap-1 text-sm text-muted">
         Granularity

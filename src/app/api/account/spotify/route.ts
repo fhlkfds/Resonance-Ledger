@@ -5,6 +5,7 @@ import { ProblemError } from '@/lib/api/errors';
 import { requireMutationSession } from '@/lib/auth/mutations';
 import { RECENT_AUTH_SECONDS } from '@/lib/auth/sessions';
 import { database } from '@/lib/db/client';
+import { disconnectUser } from '@/lib/db/repositories/disconnect';
 
 const bodySchema = z.object({ confirmation: z.literal('DELETE') }).strict();
 
@@ -25,28 +26,7 @@ export async function DELETE(request: Request): Promise<NextResponse> {
         'CONFIRMATION_REQUIRED',
         'Type DELETE to confirm disconnection',
       );
-    await database.$transaction(async (transaction) => {
-      await transaction.spotifyAccount.updateMany({
-        where: { userId: session.userId },
-        data: { state: 'DELETING' },
-      });
-      await transaction.appSession.updateMany({
-        where: { userId: session.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      await transaction.spotifyAccount.deleteMany({
-        where: { userId: session.userId },
-      });
-      await transaction.track.deleteMany({ where: { history: { none: {} } } });
-      await transaction.album.deleteMany({ where: { tracks: { none: {} } } });
-      await transaction.artist.deleteMany({
-        where: { tracks: { none: {} }, albums: { none: {} } },
-      });
-      await transaction.user.update({
-        where: { id: session.userId },
-        data: { status: 'DISCONNECTED' },
-      });
-    });
+    await disconnectUser(database, session.userId);
     return new NextResponse(null, {
       status: 204,
       headers: { 'X-Request-ID': requestId },

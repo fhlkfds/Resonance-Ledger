@@ -2,12 +2,13 @@
 
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts/core';
-import { BarChart, LineChart, PieChart } from 'echarts/charts';
+import { BarChart, HeatmapChart, LineChart, PieChart } from 'echarts/charts';
 import {
   AriaComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,
+  VisualMapComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 
@@ -15,14 +16,16 @@ echarts.use([
   BarChart,
   LineChart,
   PieChart,
+  HeatmapChart,
   AriaComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,
+  VisualMapComponent,
   CanvasRenderer,
 ]);
 
-export type ChartKind = 'line' | 'column' | 'bar' | 'donut';
+export type ChartKind = 'line' | 'column' | 'bar' | 'donut' | 'heatmap';
 
 export type ChartSeries = {
   name: string;
@@ -102,16 +105,53 @@ export default function AnalyticsChartCanvas({
       backgroundColor: 'transparent',
       textStyle: { color: '#f0f4f8' },
       color: PALETTE,
-      tooltip: {
-        trigger: kind === 'donut' ? ('item' as const) : ('axis' as const),
-      },
+      tooltip:
+        kind === 'heatmap'
+          ? {
+              trigger: 'item' as const,
+              formatter: ({ value }: { value: number[] }) => {
+                const [hour = 0, weekday = 0, metric = 0] = value;
+                const formatted = asDuration
+                  ? hoursFormatter(metric)
+                  : metric.toLocaleString();
+                return `${series[weekday]?.name ?? ''} ${categories[hour] ?? ''}: ${formatted}`;
+              },
+            }
+          : {
+              trigger: kind === 'donut' ? ('item' as const) : ('axis' as const),
+            },
       legend:
         series.length > 1
           ? { textStyle: { color: '#9da7b3' }, top: 0 }
           : { show: false },
     };
 
-    if (kind === 'donut') {
+    if (kind === 'heatmap') {
+      const values = series.flatMap((entry, weekday) =>
+        entry.values.map((value, hour) => [hour, weekday, value]),
+      );
+      chart.setOption({
+        ...common,
+        grid: { left: 12, right: 16, top: 16, bottom: 56, containLabel: true },
+        xAxis: categoryAxis,
+        yAxis: {
+          type: 'category',
+          data: series.map((entry) => entry.name),
+          axisLabel: AXIS_LABEL,
+        },
+        visualMap: {
+          min: 0,
+          max: Math.max(1, ...values.map((entry) => entry[2]!)),
+          calculable: true,
+          orient: 'horizontal',
+          left: 'center',
+          bottom: 0,
+          textStyle: AXIS_LABEL,
+          inRange: { color: ['#17201f', ACCENT] },
+        },
+        series: [{ type: 'heatmap', data: values }],
+      });
+    } else if (kind === 'donut') {
       chart.setOption({
         ...common,
         series: [

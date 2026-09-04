@@ -21,6 +21,7 @@ const dimension = z.enum([
   'time',
   'hour',
   'weekday',
+  'hourWeekday',
   'month',
   'yearOverYear',
   'artist',
@@ -44,7 +45,7 @@ function listValues(parameters: URLSearchParams, name: string) {
   return [
     ...parameters.getAll(`${name}[]`),
     ...(parameters.get(name)?.split(',') ?? []),
-  ].filter(Boolean);
+  ];
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -62,6 +63,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       'limit',
       'distributionLimit',
       'years',
+      'years[]',
     ]);
     if ([...url.searchParams.keys()].some((key) => !allowed.has(key)))
       throw new ProblemError(
@@ -70,7 +72,13 @@ export async function GET(request: Request): Promise<NextResponse> {
         'Query parameters are invalid',
       );
     const rangeParameters = new URLSearchParams(url.searchParams);
-    for (const name of ['metrics', 'metrics[]', 'dimensions', 'dimensions[]'])
+    for (const name of [
+      'metrics',
+      'metrics[]',
+      'dimensions',
+      'dimensions[]',
+      'years[]',
+    ])
       rangeParameters.delete(name);
     const requestUrl = new URL(url);
     requestUrl.search = rangeParameters.toString();
@@ -81,22 +89,41 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
     const metricValues = listValues(url.searchParams, 'metrics');
     const dimensionValues = listValues(url.searchParams, 'dimensions');
-    const metrics = z
-      .array(metric)
-      .min(1)
-      .parse(
-        metricValues.length ? metricValues : ['plays', 'estimatedDurationMs'],
-      );
-    const dimensions = z
-      .array(dimension)
-      .min(1)
-      .parse(dimensionValues.length ? dimensionValues : ['time']);
-    const years = query.years
-      ? z
+    const yearValues = listValues(url.searchParams, 'years');
+    const lists = z
+      .object({
+        metrics: z
+          .array(metric)
+          .min(1)
+          .max(5)
+          .refine((values) => new Set(values).size === values.length),
+        dimensions: z
+          .array(dimension)
+          .min(1)
+          .max(11)
+          .refine((values) => new Set(values).size === values.length),
+        years: z
           .array(z.coerce.number().int().min(1970).max(9999))
+          .min(1)
           .max(20)
-          .parse(query.years.split(','))
-      : undefined;
+          .refine((values) => new Set(values).size === values.length)
+          .optional(),
+      })
+      .strict()
+      .safeParse({
+        metrics: metricValues.length
+          ? metricValues
+          : ['plays', 'estimatedDurationMs'],
+        dimensions: dimensionValues.length ? dimensionValues : ['time'],
+        ...(yearValues.length ? { years: yearValues } : {}),
+      });
+    if (!lists.success)
+      throw new ProblemError(
+        400,
+        'INVALID_QUERY',
+        'Query parameters are invalid',
+      );
+    const { metrics, dimensions, years } = lists.data;
     let entity: { kind: 'track' | 'artist' | 'album'; id: string } | undefined;
     if (query.entityId) {
       const repository = new ApiRepository(database);
@@ -128,6 +155,7 @@ export async function GET(request: Request): Promise<NextResponse> {
       time: result.time,
       hour: result.hourly,
       weekday: result.weekday,
+      hourWeekday: result.hourWeekday,
       month: result.month,
       yearOverYear: result.yearOverYear,
       artist: result.rankings.artists,

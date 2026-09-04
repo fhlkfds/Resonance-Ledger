@@ -33,6 +33,7 @@ import { analyticsData } from '@/lib/stats/analytics';
 import { runRetention } from '@/worker/retention';
 import { resolveRange } from '@/lib/stats/dates';
 import { enforceRateLimit } from '@/lib/api/rate-limit';
+import { disconnectUser } from '@/lib/db/repositories/disconnect';
 import { spotifyItem } from '../fixtures/spotify';
 
 let container: StartedPostgreSqlContainer;
@@ -320,6 +321,42 @@ async function createSyncAccount(
 }
 
 describe('synchronization persistence', () => {
+  it('lets two workers replay the same 50 items without extra rows', async () => {
+    const account = await createSyncAccount('concurrent-dedupe');
+    const track = await database.track.create({
+      data: {
+        externalKey: 'spotify:concurrent-dedupe',
+        spotifyId: 'concurrent-dedupe',
+        name: 'Concurrent',
+        normalizedName: 'concurrent',
+        durationMs: 1,
+        metadataFetchedAt: new Date(),
+      },
+    });
+    const items = Array.from({ length: 50 }, (_, index) => ({
+      spotifyAccountId: account.id,
+      trackId: track.id,
+      playedAt: new Date(Date.UTC(2026, 8, 2, 0, index)),
+      estimatedDurationMs: 1,
+    }));
+    const workers = await Promise.all([
+      database.listeningHistory.createMany({
+        data: items,
+        skipDuplicates: true,
+      }),
+      database.listeningHistory.createMany({
+        data: items,
+        skipDuplicates: true,
+      }),
+    ]);
+    expect(workers.reduce((sum, result) => sum + result.count, 0)).toBe(50);
+    expect(
+      await database.listeningHistory.count({
+        where: { spotifyAccountId: account.id },
+      }),
+    ).toBe(50);
+  });
+
   it('leases a due account once and reclaims an expired running lease', async () => {
     const account = await createSyncAccount('lease');
     const now = new Date('2026-09-03T12:00:00.000Z');
@@ -1161,6 +1198,12 @@ describe('T-015/T-017 golden statistics', () => {
     expect(result.weekday).toHaveLength(7);
     expect(result.weekday[0]!.bucket).toBe('Monday');
     expect(result.weekday.reduce((sum, point) => sum + point.plays, 0)).toBe(4);
+    expect(result.hourWeekday).toHaveLength(7);
+    expect(
+      result.hourWeekday
+        .flatMap((day) => day.points)
+        .reduce((sum, point) => sum + point.plays, 0),
+    ).toBe(4);
     expect(
       result.weekday.find((point) => point.bucket === 'Saturday')!.plays,
     ).toBe(3);
@@ -1172,6 +1215,28 @@ describe('T-015/T-017 golden statistics', () => {
     expect(result.distributions.artists.denominator).toBe(6);
     // Only Alpha and Bravo carry an album, so 3 of 4 plays have one.
     expect(result.distributions.albums.denominator).toBe(3);
+
+    const selectedYears = await analyticsData(database, user.id, range, 1, {
+      years: [2025, 2026],
+      distributionLimit: 1,
+    });
+    expect(selectedYears.yearOverYear.map(({ year }) => year)).toEqual([
+      2025, 2026,
+    ]);
+    expect(selectedYears.yearOverYear[0]!.points).toHaveLength(365);
+    expect(selectedYears.yearOverYear[1]!.points).toHaveLength(365);
+    expect(
+      selectedYears.yearOverYear[1]!.points.reduce(
+        (sum, point) => sum + point.plays,
+        0,
+      ),
+    ).toBe(4);
+    expect(
+      selectedYears.distributions.artists.items.reduce(
+        (sum, item) => sum + item.plays,
+        0,
+      ),
+    ).toBe(selectedYears.distributions.artists.denominator);
 
     // T-017: an empty range returns zeroed totals and zero-filled series.
     const emptyRange = resolveRange({
@@ -1205,6 +1270,17 @@ describe('T-015/T-017 golden statistics', () => {
 });
 
 describe('T-023 retention', () => {
+  it('disconnects idempotently', async () => {
+    const user = await database.user.create({
+      data: { status: 'ACTIVE', settings: { create: {} } },
+    });
+    await disconnectUser(database, user.id);
+    await disconnectUser(database, user.id);
+    await expect(
+      database.user.findUniqueOrThrow({ where: { id: user.id } }),
+    ).resolves.toMatchObject({ status: 'DISCONNECTED' });
+  });
+
   it('removes expired history, keeps referenced metadata, and purges orphans', async () => {
     const envelope = {
       version: 'v1',

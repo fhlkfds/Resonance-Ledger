@@ -23,6 +23,8 @@
     "format:check": "prettier --check .",
     "typegen": "next typegen",
     "test:shell": "bats tests/shell",
+    "test:smoke": "node --test tests/smoke",
+    "test:e2e": "playwright test",
     "lint:shell": "shellcheck scripts/*.sh",
     "smoke": "node scripts/smoke-test.mjs",
     "validate:env": "node scripts/validate-env.mjs .env"

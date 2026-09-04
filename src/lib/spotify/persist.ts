@@ -1,5 +1,9 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { normalizePlayedItem, type NormalizedArtist } from './normalize';
+import {
+  normalizePlayedItem,
+  type NormalizedArtist,
+  type NormalizedPlay,
+} from './normalize';
 import type { SpotifyPlayedItem } from './schemas';
 
 function deterministicJitter(accountId: string): number {
@@ -21,12 +25,110 @@ async function upsertArtist(
       name: artist.name,
       normalizedName: artist.normalizedName,
       spotifyUri: artist.spotifyUri,
-      imageUrl: artist.imageUrl,
+      ...(artist.imageUrl ? { imageUrl: artist.imageUrl } : {}),
       metadataFetchedAt: now,
     },
     select: { id: true },
   });
   return row.id;
+}
+
+export async function upsertNormalizedTrack(
+  transaction: Prisma.TransactionClient,
+  track: NormalizedPlay['track'],
+  now: Date,
+): Promise<string> {
+  const album = track.album;
+  let albumId: string | null = null;
+  if (album) {
+    const saved = await transaction.album.upsert({
+      where: { externalKey: album.externalKey },
+      create: {
+        externalKey: album.externalKey,
+        spotifyId: album.spotifyId,
+        name: album.name,
+        normalizedName: album.normalizedName,
+        albumType: album.albumType,
+        releaseDateText: album.releaseDateText,
+        releaseDatePrecision: album.releaseDatePrecision,
+        releaseYear: album.releaseYear,
+        spotifyUri: album.spotifyUri,
+        artworkUrl: album.artworkUrl,
+        metadataFetchedAt: now,
+      },
+      update: {
+        name: album.name,
+        normalizedName: album.normalizedName,
+        albumType: album.albumType,
+        releaseDateText: album.releaseDateText,
+        releaseDatePrecision: album.releaseDatePrecision,
+        releaseYear: album.releaseYear,
+        spotifyUri: album.spotifyUri,
+        artworkUrl: album.artworkUrl,
+        metadataFetchedAt: now,
+      },
+      select: { id: true },
+    });
+    albumId = saved.id;
+    const artistIds = await Promise.all(
+      album.artists.map((artist) => upsertArtist(transaction, artist, now)),
+    );
+    await transaction.albumArtist.deleteMany({ where: { albumId } });
+    if (artistIds.length)
+      await transaction.albumArtist.createMany({
+        data: artistIds.map((artistId, position) => ({
+          albumId: saved.id,
+          artistId,
+          position,
+        })),
+      });
+  }
+  const savedTrack = await transaction.track.upsert({
+    where: { externalKey: track.externalKey },
+    create: {
+      externalKey: track.externalKey,
+      spotifyId: track.spotifyId,
+      albumId,
+      name: track.name,
+      normalizedName: track.normalizedName,
+      durationMs: track.durationMs,
+      discNumber: track.discNumber,
+      trackNumber: track.trackNumber,
+      explicit: track.explicit,
+      isLocal: track.isLocal,
+      spotifyUri: track.spotifyUri,
+      isrc: track.isrc,
+      metadataFetchedAt: now,
+    },
+    update: {
+      albumId,
+      name: track.name,
+      normalizedName: track.normalizedName,
+      durationMs: track.durationMs,
+      discNumber: track.discNumber,
+      trackNumber: track.trackNumber,
+      explicit: track.explicit,
+      spotifyUri: track.spotifyUri,
+      isrc: track.isrc,
+      metadataFetchedAt: now,
+    },
+    select: { id: true },
+  });
+  const artistIds = await Promise.all(
+    track.artists.map((artist) => upsertArtist(transaction, artist, now)),
+  );
+  await transaction.trackArtist.deleteMany({
+    where: { trackId: savedTrack.id },
+  });
+  if (artistIds.length)
+    await transaction.trackArtist.createMany({
+      data: artistIds.map((artistId, position) => ({
+        trackId: savedTrack.id,
+        artistId,
+        position,
+      })),
+    });
+  return savedTrack.id;
 }
 
 export async function persistSyncBatch(
@@ -64,102 +166,12 @@ export async function persistSyncBatch(
       throw new Error('Sync lease is not owned or has expired');
     let inserted = 0;
     for (const play of plays) {
-      const album = play.track.album;
-      let albumId: string | null = null;
-      if (album) {
-        const saved = await transaction.album.upsert({
-          where: { externalKey: album.externalKey },
-          create: {
-            externalKey: album.externalKey,
-            spotifyId: album.spotifyId,
-            name: album.name,
-            normalizedName: album.normalizedName,
-            albumType: album.albumType,
-            releaseDateText: album.releaseDateText,
-            releaseDatePrecision: album.releaseDatePrecision,
-            releaseYear: album.releaseYear,
-            spotifyUri: album.spotifyUri,
-            artworkUrl: album.artworkUrl,
-            metadataFetchedAt: now,
-          },
-          update: {
-            name: album.name,
-            normalizedName: album.normalizedName,
-            albumType: album.albumType,
-            releaseDateText: album.releaseDateText,
-            releaseDatePrecision: album.releaseDatePrecision,
-            releaseYear: album.releaseYear,
-            spotifyUri: album.spotifyUri,
-            artworkUrl: album.artworkUrl,
-            metadataFetchedAt: now,
-          },
-          select: { id: true },
-        });
-        albumId = saved.id;
-        const artistIds = await Promise.all(
-          album.artists.map((artist) => upsertArtist(transaction, artist, now)),
-        );
-        await transaction.albumArtist.deleteMany({ where: { albumId } });
-        if (artistIds.length)
-          await transaction.albumArtist.createMany({
-            data: artistIds.map((artistId, position) => ({
-              albumId: saved.id,
-              artistId,
-              position,
-            })),
-          });
-      }
-      const savedTrack = await transaction.track.upsert({
-        where: { externalKey: play.track.externalKey },
-        create: {
-          externalKey: play.track.externalKey,
-          spotifyId: play.track.spotifyId,
-          albumId,
-          name: play.track.name,
-          normalizedName: play.track.normalizedName,
-          durationMs: play.track.durationMs,
-          discNumber: play.track.discNumber,
-          trackNumber: play.track.trackNumber,
-          explicit: play.track.explicit,
-          isLocal: play.track.isLocal,
-          spotifyUri: play.track.spotifyUri,
-          isrc: play.track.isrc,
-          metadataFetchedAt: now,
-        },
-        update: {
-          albumId,
-          name: play.track.name,
-          normalizedName: play.track.normalizedName,
-          durationMs: play.track.durationMs,
-          discNumber: play.track.discNumber,
-          trackNumber: play.track.trackNumber,
-          explicit: play.track.explicit,
-          spotifyUri: play.track.spotifyUri,
-          isrc: play.track.isrc,
-          metadataFetchedAt: now,
-        },
-        select: { id: true },
-      });
-      const artistIds = await Promise.all(
-        play.track.artists.map((artist) =>
-          upsertArtist(transaction, artist, now),
-        ),
-      );
-      await transaction.trackArtist.deleteMany({
-        where: { trackId: savedTrack.id },
-      });
-      await transaction.trackArtist.createMany({
-        data: artistIds.map((artistId, position) => ({
-          trackId: savedTrack.id,
-          artistId,
-          position,
-        })),
-      });
+      const trackId = await upsertNormalizedTrack(transaction, play.track, now);
       const event = await transaction.listeningHistory.createMany({
         data: [
           {
             spotifyAccountId: input.accountId,
-            trackId: savedTrack.id,
+            trackId,
             playedAt: play.playedAt,
             estimatedDurationMs: play.estimatedDurationMs,
           },

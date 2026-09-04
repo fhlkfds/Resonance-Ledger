@@ -5,9 +5,11 @@ import { leaseNextDueAccount } from '@/lib/db/repositories/sync';
 import { logger } from '@/lib/observability/logger';
 import { runRetention } from './retention';
 import { syncLeasedAccount } from './sync-account';
+import { refreshMetadata } from './metadata-refresh';
 
 /** Retention runs once a day; the tick loop just checks whether it is due. */
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const METADATA_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export async function runScheduler(
   database: PrismaClient,
@@ -18,6 +20,7 @@ export async function runScheduler(
   // Run one pass shortly after start so a long-stopped installation catches up
   // without waiting a full day.
   let retentionDueAt = Date.now();
+  let metadataDueAt = Date.now();
 
   while (!signal.aborted) {
     if (Date.now() >= retentionDueAt) {
@@ -37,6 +40,21 @@ export async function runScheduler(
         );
       }
       retentionDueAt = Date.now() + RETENTION_INTERVAL_MS;
+    }
+
+    if (Date.now() >= metadataDueAt) {
+      try {
+        await refreshMetadata(database, environment);
+      } catch (error) {
+        logger.error(
+          {
+            event: 'metadata_refresh.failed',
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'metadata refresh failed and will be retried',
+        );
+      }
+      metadataDueAt = Date.now() + METADATA_INTERVAL_MS;
     }
 
     const lease = await leaseNextDueAccount(database, workerId);

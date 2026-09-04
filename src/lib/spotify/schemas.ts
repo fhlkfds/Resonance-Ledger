@@ -14,6 +14,9 @@ const artistSchema = z
     uri: z.string().nullable().optional(),
   })
   .passthrough();
+export const spotifyArtistSchema = artistSchema.extend({
+  images: z.array(imageSchema).max(20).default([]),
+});
 const albumSchema = z
   .object({
     id: z.string().nullable(),
@@ -30,7 +33,7 @@ const albumSchema = z
   })
   .passthrough();
 
-const trackSchema = z
+export const spotifyTrackSchema = z
   .object({
     id: z.string().nullable(),
     name: z.string().min(1).max(2000),
@@ -56,7 +59,7 @@ export const recentlyPlayedPageSchemaV1 = z
         z
           .object({
             played_at: z.iso.datetime({ offset: true }),
-            track: trackSchema,
+            track: spotifyTrackSchema,
           })
           .passthrough(),
       )
@@ -75,3 +78,11 @@ export const recentlyPlayedPageSchemaV1 = z
 export type SpotifyPlayedItem = z.infer<
   typeof recentlyPlayedPageSchemaV1
 >['items'][number];
+
+export const spotifyTracksSchema = z
+  .object({ tracks: z.array(spotifyTrackSchema.nullable()).max(50) })
+  .passthrough();
+
+export const spotifyArtistsSchema = z
+  .object({ artists: z.array(spotifyArtistSchema.nullable()).max(50) })
+  .passthrough();

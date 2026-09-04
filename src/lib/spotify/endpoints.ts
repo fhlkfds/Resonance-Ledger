@@ -28,7 +28,9 @@ function overrideOrigin(
     throw new Error(`${variable} may only be set when NODE_ENV is test`);
   }
   if (!LOOPBACK_ORIGIN.test(candidate)) {
-    throw new Error(`${variable} must be a loopback origin such as http://127.0.0.1:4010`);
+    throw new Error(
+      `${variable} must be a loopback origin such as http://127.0.0.1:4010`,
+    );
   }
   return candidate;
 }

@@ -5,6 +5,7 @@ import {
   enumerateBuckets,
   startOfBucket,
   utcToZonedParts,
+  zonedPartsToUtc,
   type Granularity,
   type ResolvedRange,
 } from './dates';
@@ -160,6 +161,7 @@ export async function analyticsData(
   const time = new Map<string, MetricPoint>();
   const hours = new Map<string, MetricPoint>();
   const weekdays = new Map<string, MetricPoint>();
+  const hourWeekdays = new Map<string, MetricPoint>();
   const months = new Map<string, MetricPoint>();
   const yearDays = new Map<number, Map<string, MetricPoint>>();
   const tracks = new Map<string, RankedEntity>();
@@ -182,6 +184,11 @@ export async function analyticsData(
     increment(
       weekdays,
       weekdayNames[parts.weekday]!,
+      event.estimatedDurationMs,
+    );
+    increment(
+      hourWeekdays,
+      `${weekdayNames[parts.weekday]}:${parts.hour}`,
       event.estimatedDurationMs,
     );
     increment(months, monthNames[parts.month - 1]!, event.estimatedDurationMs);
@@ -211,6 +218,44 @@ export async function analyticsData(
   const selectedYears = options.years?.length
     ? [...new Set(options.years)].sort((a, b) => a - b)
     : [...yearDays.keys()].sort((a, b) => a - b);
+  if (options.years?.length) {
+    const selectedYearEvents = await database.listeningHistory.findMany({
+      where: {
+        spotifyAccount: { userId },
+        OR: selectedYears.map((year) => ({
+          playedAt: {
+            gte: zonedPartsToUtc(range.timezone, year, 1, 1),
+            lt: zonedPartsToUtc(range.timezone, year + 1, 1, 1),
+          },
+        })),
+        ...(options.entity?.kind === 'track'
+          ? { trackId: options.entity.id }
+          : {}),
+        ...(options.entity?.kind === 'album'
+          ? { track: { albumId: options.entity.id } }
+          : {}),
+        ...(options.entity?.kind === 'artist'
+          ? {
+              track: {
+                artists: { some: { artistId: options.entity.id } },
+              },
+            }
+          : {}),
+      },
+      select: { playedAt: true, estimatedDurationMs: true },
+    });
+    yearDays.clear();
+    for (const event of selectedYearEvents) {
+      const parts = utcToZonedParts(event.playedAt, range.timezone);
+      const year = yearDays.get(parts.year) ?? new Map<string, MetricPoint>();
+      increment(
+        year,
+        `${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`,
+        event.estimatedDurationMs,
+      );
+      yearDays.set(parts.year, year);
+    }
+  }
   const weekdayOrder = Array.from(
     { length: 7 },
     (_, index) => weekdayNames[(weekStartsOn + index) % 7]!,
@@ -264,6 +309,19 @@ export async function analyticsData(
           estimatedDurationMs: 0,
         },
     ),
+    hourWeekday: weekdayOrder.map((weekday) => ({
+      weekday,
+      points: Array.from({ length: 24 }, (_, hour) => {
+        const label = hour.toString().padStart(2, '0');
+        return (
+          hourWeekdays.get(`${weekday}:${hour}`) ?? {
+            bucket: label,
+            plays: 0,
+            estimatedDurationMs: 0,
+          }
+        );
+      }),
+    })),
     month: monthNames.map(
       (label) =>
         months.get(label) ?? {
@@ -274,9 +332,22 @@ export async function analyticsData(
     ),
     yearOverYear: selectedYears.map((year) => ({
       year,
-      points: [...(yearDays.get(year)?.values() ?? [])].sort((left, right) =>
-        left.bucket.localeCompare(right.bucket),
-      ),
+      points: enumerateBuckets(
+        zonedPartsToUtc(range.timezone, year, 1, 1),
+        zonedPartsToUtc(range.timezone, year + 1, 1, 1),
+        range.timezone,
+        'day',
+        weekStartsOn,
+      ).map((start) => {
+        const label = bucketLabel(start, range.timezone, 'day').slice(5);
+        return (
+          yearDays.get(year)?.get(label) ?? {
+            bucket: label,
+            plays: 0,
+            estimatedDurationMs: 0,
+          }
+        );
+      }),
     })),
     rankings: {
       artists: rankedArtists.slice(0, options.rankingLimit ?? 25),
@@ -292,7 +363,8 @@ export async function analyticsData(
       granularity,
       timezone: range.timezone,
       weekStartsOn,
-      leapDay: 'February 29 is shown only for years in which it exists.',
+      leapDay:
+        'February 29 is a separate bucket; non-leap years contribute zero.',
     },
   };
 }

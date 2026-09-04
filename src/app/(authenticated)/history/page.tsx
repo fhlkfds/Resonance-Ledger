@@ -6,6 +6,7 @@ import { assertOwnedEntityFilters } from '@/lib/api/ownership';
 import { requireSession } from '@/lib/auth/request-session';
 import { database } from '@/lib/db/client';
 import { ApiRepository } from '@/lib/db/repositories/api';
+import { DebouncedSearchInput } from '@/components/filters/DebouncedSearchInput';
 
 export default async function HistoryPage(props: PageProps<'/history'>) {
   const session = await requireSession();
@@ -71,12 +72,10 @@ export default async function HistoryPage(props: PageProps<'/history'>) {
       <form className="grid gap-3 rounded-2xl border border-white/10 bg-panel p-4 md:grid-cols-4">
         <label className="grid gap-1 text-sm md:col-span-2">
           Search track
-          <input
-            className="min-w-0 rounded-lg border border-white/15 bg-background px-3 py-2"
-            defaultValue={parsed.q}
-            maxLength={200}
-            name="q"
-            type="search"
+          <DebouncedSearchInput
+            defaultValue={parsed.q ?? ''}
+            key={parsed.q ?? ''}
+            label="Search track"
           />
         </label>
         <label className="grid gap-1 text-sm">

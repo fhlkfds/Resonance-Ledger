@@ -29,7 +29,7 @@ describe('provider origins', () => {
   });
 
   it('refuses an override in development or production', () => {
-    for (const nodeEnv of ['production', 'development']) {
+    for (const nodeEnv of ['production', 'development'] as const) {
       expect(() =>
         accountsOrigin({
           NODE_ENV: nodeEnv,
@@ -49,8 +49,8 @@ describe('provider origins', () => {
       'http://127.0.0.1.evil.test:4010',
       'file:///etc/passwd',
     ]) {
-      expect(() =>
-        apiOrigin({ NODE_ENV: 'test', SPOTIFY_API_ORIGIN: hostile }),
+      expect(
+        () => apiOrigin({ NODE_ENV: 'test', SPOTIFY_API_ORIGIN: hostile }),
         `expected ${hostile} to be refused`,
       ).toThrow(/loopback origin/);
     }

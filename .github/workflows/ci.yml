@@ -32,6 +32,7 @@ jobs:
       - run: npm run typecheck
       # Fails below 90% branch coverage on crypto, normalization, dates, auth.
       - run: npm run test:coverage
+      - run: npm run test:smoke
       - run: npm run build:worker
       - run: npm run build
       - name: Upload coverage summary
@@ -73,6 +74,36 @@ jobs:
       - run: npm ci
       - run: npx prisma generate
       - run: npm run test:integration
+
+  e2e:
+    name: Playwright with fake Spotify boundary
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: resonance_e2e
+          POSTGRES_USER: resonance
+          POSTGRES_PASSWORD: resonance-e2e-password-long
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U resonance -d resonance_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      E2E_DATABASE_URL: postgresql://resonance:resonance-e2e-password-long@127.0.0.1:5432/resonance_e2e?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
 
   # Both image targets must build from a clean context with no .env present.
   images:

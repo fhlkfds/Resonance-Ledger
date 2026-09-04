@@ -131,15 +131,19 @@ describe('statistics filter', () => {
     const { container } = render(
       <StatisticsFilter
         range="LAST_7_DAYS"
+        compare="LAST_30_DAYS"
         metric="estimatedDurationMs"
         granularity="week"
+        years="2025,2026"
         timezone="Europe/Berlin"
       />,
     );
     expect(container.querySelector('form')).toHaveAttribute('method', 'get');
     expect(screen.getByLabelText('Date range')).toHaveValue('LAST_7_DAYS');
+    expect(screen.getByLabelText('Compare with')).toHaveValue('LAST_30_DAYS');
     expect(screen.getByLabelText('Metric')).toHaveValue('estimatedDurationMs');
     expect(screen.getByLabelText('Granularity')).toHaveValue('week');
+    expect(screen.getByLabelText('Years')).toHaveValue('2025,2026');
     expect(screen.getByText('Timezone: Europe/Berlin')).toBeInTheDocument();
   });
 
@@ -147,8 +151,10 @@ describe('statistics filter', () => {
     render(
       <StatisticsFilter
         range="TODAY"
+        compare=""
         metric="plays"
         granularity="auto"
+        years=""
         timezone="UTC"
       />,
     );
