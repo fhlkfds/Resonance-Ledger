@@ -11,12 +11,19 @@ import { resolveRequestId } from '@/lib/observability/request-id';
 export async function POST(request: Request): Promise<NextResponse> {
   const requestId = resolveRequestId(request.headers.get('x-request-id'));
   try {
-    const session = await requireSession();
+    const session = await requireSession(request);
     if (
       !validateSameOrigin(request, getEnvironment().APP_URL) ||
       !validateCsrfToken(request.headers.get('x-csrf-token'), session.csrfHash)
     ) {
-      return problemResponse(new ProblemError(403, 'CSRF_REJECTED', 'Request origin or CSRF token is invalid'), requestId);
+      return problemResponse(
+        new ProblemError(
+          403,
+          'CSRF_REJECTED',
+          'Request origin or CSRF token is invalid',
+        ),
+        requestId,
+      );
     }
     const result = await queueManualSync(database, session.userId);
     if (result === 'limited')

@@ -74,6 +74,8 @@ CREATE TABLE "oauth_states" (
     "id" UUID NOT NULL,
     "user_id" UUID,
     "state_hash" TEXT NOT NULL,
+    "purpose" TEXT NOT NULL DEFAULT 'OAUTH',
+    "rate_key" TEXT,
     "return_path" TEXT,
     "expires_at" TIMESTAMPTZ(6) NOT NULL,
     "used_at" TIMESTAMPTZ(6),
@@ -236,6 +238,9 @@ CREATE UNIQUE INDEX "oauth_states_state_hash_key" ON "oauth_states"("state_hash"
 CREATE INDEX "oauth_states_expires_at_idx" ON "oauth_states"("expires_at");
 
 -- CreateIndex
+CREATE INDEX "oauth_states_purpose_rate_key_created_at_idx" ON "oauth_states"("purpose", "rate_key", "created_at");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "artists_external_key_key" ON "artists"("external_key");
 
 -- CreateIndex
@@ -347,6 +352,12 @@ ALTER TABLE "user_settings"
   ADD CONSTRAINT "user_settings_week_starts_on_check" CHECK ("week_starts_on" BETWEEN 0 AND 6),
   ADD CONSTRAINT "user_settings_retention_days_check" CHECK ("retention_days" > 0);
 
+ALTER TABLE "oauth_states"
+  ADD CONSTRAINT "oauth_states_purpose_check" CHECK (
+    ("purpose" = 'OAUTH' AND "rate_key" IS NULL) OR
+    ("purpose" = 'RATE' AND "rate_key" IS NOT NULL)
+  );
+
 ALTER TABLE "artists"
   ADD CONSTRAINT "artists_external_key_check" CHECK (
     ("spotify_id" IS NOT NULL AND "external_key" = 'spotify:' || "spotify_id") OR
@@ -403,6 +414,6 @@ CREATE INDEX "artists_normalized_name_trgm_idx" ON "artists" USING GIN ("normali
 CREATE INDEX "albums_normalized_name_trgm_idx" ON "albums" USING GIN ("normalized_name" gin_trgm_ops);
 CREATE INDEX "tracks_normalized_name_trgm_idx" ON "tracks" USING GIN ("normalized_name" gin_trgm_ops);
 CREATE INDEX "sync_state_due_idx" ON "sync_state" ("next_sync_at", "lease_expires_at")
-  WHERE "status" IN ('IDLE', 'BACKOFF');
+  WHERE "status" IN ('IDLE', 'BACKOFF', 'RUNNING');
 CREATE INDEX "app_sessions_live_idx" ON "app_sessions" ("token_hash", "expires_at")
   WHERE "revoked_at" IS NULL;

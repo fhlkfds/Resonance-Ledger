@@ -4,8 +4,9 @@ import { database } from '@/lib/db/client';
 import { getEnvironment } from '@/lib/env';
 import { sessionCookieName } from './cookies';
 import { resolveSession } from './sessions';
+import { enforceRateLimit } from '@/lib/api/rate-limit';
 
-export async function requireSession() {
+export async function requireSession(request?: Request) {
   const environment = getEnvironment();
   const token = (await cookies()).get(
     sessionCookieName(environment.NODE_ENV === 'production'),
@@ -17,5 +18,8 @@ export async function requireSession() {
       'AUTHENTICATION_REQUIRED',
       'Authentication required',
     );
+  if (request) {
+    await enforceRateLimit(database, `api:${session.id}`, 120, 60);
+  }
   return session;
 }

@@ -3,6 +3,8 @@ import type { SpotifyPlayedItem } from './schemas';
 
 export function normalizeName(value: string): string {
   return value
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .normalize('NFKC')
     .trim()
     .replace(/\s+/g, ' ')

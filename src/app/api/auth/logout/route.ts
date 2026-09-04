@@ -21,5 +21,6 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
   await revokeSession(database, token);
   cookieStore.delete(sessionCookieName(production));
+  cookieStore.delete('resonance_csrf');
   return new NextResponse(null, { status: 204 });
 }

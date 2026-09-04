@@ -17,7 +17,7 @@ export async function leaseNextDueAccount(
       FROM sync_state ss
       JOIN spotify_accounts sa ON sa.id = ss.spotify_account_id
       WHERE sa.state = 'ACTIVE'::"AccountState"
-        AND ss.status IN ('IDLE'::"SyncStatus", 'BACKOFF'::"SyncStatus")
+        AND ss.status IN ('IDLE'::"SyncStatus", 'BACKOFF'::"SyncStatus", 'RUNNING'::"SyncStatus")
         AND ss.next_sync_at <= ${now}
         AND (ss.lease_expires_at IS NULL OR ss.lease_expires_at <= ${now})
       ORDER BY ss.next_sync_at, ss.spotify_account_id

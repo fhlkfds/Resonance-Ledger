@@ -28,7 +28,13 @@ export async function consumeOAuthState(
     const state = await transaction.oAuthState.findUnique({
       where: { stateHash: hashSecret(rawState) },
     });
-    if (!state || state.usedAt || state.expiresAt <= now) return null;
+    if (
+      !state ||
+      state.purpose !== 'OAUTH' ||
+      state.usedAt ||
+      state.expiresAt <= now
+    )
+      return null;
     const result = await transaction.oAuthState.updateMany({
       where: { id: state.id, usedAt: null, expiresAt: { gt: now } },
       data: { usedAt: now },

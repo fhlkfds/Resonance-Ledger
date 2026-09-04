@@ -63,15 +63,21 @@ export async function GET(request: Request): Promise<NextResponse> {
     });
     const profile = await fetchSpotifyProfile(tokens.access_token);
     const now = new Date();
-    const user = state.userId
-      ? await database.user.findUniqueOrThrow({ where: { id: state.userId } })
-      : await createConsentedUser(database, now);
-    const key = Buffer.from(environment.TOKEN_ENCRYPTION_KEY, 'base64');
     const existing = await database.spotifyAccount.findUnique({
       where: { spotifyAccountId: profile.account_id },
     });
-    if (existing && existing.userId !== user.id)
+    if (state.userId && existing && existing.userId !== state.userId)
       return loginError(environment, 'account_already_linked');
+    if (!tokens.refresh_token && !existing)
+      return loginError(environment, 'missing_refresh_token');
+    const user = state.userId
+      ? await database.user.findUniqueOrThrow({ where: { id: state.userId } })
+      : existing
+        ? await database.user.findUniqueOrThrow({
+            where: { id: existing.userId },
+          })
+        : await createConsentedUser(database, now);
+    const key = Buffer.from(environment.TOKEN_ENCRYPTION_KEY, 'base64');
     const accountId = existing?.id ?? crypto.randomUUID();
     const accessEnvelope = encryptToken(
       tokens.access_token,
@@ -83,8 +89,6 @@ export async function GET(request: Request): Promise<NextResponse> {
       key,
     );
     const refreshToken = tokens.refresh_token;
-    if (!refreshToken && !existing)
-      return loginError(environment, 'missing_refresh_token');
     const refreshEnvelope = refreshToken
       ? encryptToken(
           refreshToken,
@@ -139,6 +143,13 @@ export async function GET(request: Request): Promise<NextResponse> {
     const session = await createSession(database, user.id, now);
     cookieStore.set(sessionCookieName(production), session.token, {
       ...secureCookieOptions(production, 30 * 24 * 60 * 60),
+      expires: session.expiresAt,
+    });
+    cookieStore.set('resonance_csrf', session.csrfToken, {
+      httpOnly: false,
+      secure: production,
+      sameSite: 'strict',
+      path: '/',
       expires: session.expiresAt,
     });
     return NextResponse.redirect(

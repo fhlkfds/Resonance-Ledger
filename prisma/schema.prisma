@@ -113,6 +113,8 @@ model OAuthState {
   id         String    @id @default(uuid()) @db.Uuid
   userId     String?   @map("user_id") @db.Uuid
   stateHash  String    @unique @map("state_hash")
+  purpose    String    @default("OAUTH")
+  rateKey    String?   @map("rate_key")
   returnPath String?   @map("return_path")
   expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
   usedAt     DateTime? @map("used_at") @db.Timestamptz(6)
@@ -121,6 +123,7 @@ model OAuthState {
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+  @@index([purpose, rateKey, createdAt])
   @@map("oauth_states")
 }
 

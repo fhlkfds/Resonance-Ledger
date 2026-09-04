@@ -7,9 +7,16 @@ import { storeOAuthState } from '@/lib/auth/oauth-repository';
 import { spotifyAuthorizationUrl } from '@/lib/auth/spotify-oauth';
 import { database } from '@/lib/db/client';
 import { getEnvironment } from '@/lib/env';
+import { enforceRateLimit, requestClientAddress } from '@/lib/api/rate-limit';
 
 export async function GET(request: Request): Promise<NextResponse> {
   const environment = getEnvironment();
+  await enforceRateLimit(
+    database,
+    `auth:${requestClientAddress(request, environment.TRUST_PROXY)}`,
+    10,
+    600,
+  );
   const store = await cookies();
   if (
     !verifyConsentReceipt(

@@ -19,7 +19,7 @@ export async function validAccessToken(
       Buffer.from(environment.TOKEN_ENCRYPTION_KEY, 'base64'),
     ],
   ]);
-  return database.$transaction(
+  const result = await database.$transaction(
     async (transaction) => {
       await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${accountId}, 0))`;
       const account = await transaction.spotifyAccount.findUniqueOrThrow({
@@ -31,7 +31,7 @@ export async function validAccessToken(
         keys,
       );
       if (account.accessTokenExpiresAt.getTime() > now.getTime() + 300_000)
-        return access;
+        return { token: access };
       const refresh = decryptToken(
         account.refreshTokenEnvelope,
         { accountId, type: 'refresh' },
@@ -50,7 +50,7 @@ export async function validAccessToken(
             leaseExpiresAt: null,
           },
         });
-        throw new InvalidGrantError();
+        return { reauth: true as const };
       }
       try {
         const response = await requestTokenRefresh({
@@ -88,7 +88,7 @@ export async function validAccessToken(
             ),
           },
         });
-        return response.access_token;
+        return { token: response.access_token };
       } catch (error) {
         if (error instanceof InvalidGrantError) {
           await transaction.spotifyAccount.update({
@@ -104,9 +104,13 @@ export async function validAccessToken(
             },
           });
         }
+        if (error instanceof InvalidGrantError)
+          return { reauth: true as const };
         throw error;
       }
     },
     { timeout: 30_000 },
   );
+  if ('reauth' in result) throw new InvalidGrantError();
+  return result.token;
 }

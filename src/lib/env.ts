@@ -61,6 +61,7 @@ export const environmentSchema = z
       .default('/var/backups/resonance-ledger'),
     BACKUP_RETENTION_DAYS: int(1, 3650).default(30),
     BACKUP_BEFORE_DEPLOY: booleanText.default(true),
+    EXTERNAL_DATABASE: booleanText.default(false),
   })
   .superRefine((environment, ctx) => {
     for (const [name, value] of Object.entries(environment)) {
@@ -106,7 +107,10 @@ export const environmentSchema = z
         message: 'must be at least SYNC_INTERVAL_SECONDS',
       });
     }
-    if (new URL(environment.DATABASE_URL).hostname !== 'postgres') {
+    if (
+      !environment.EXTERNAL_DATABASE &&
+      new URL(environment.DATABASE_URL).hostname !== 'postgres'
+    ) {
       ctx.addIssue({
         code: 'custom',
         path: ['DATABASE_URL'],
