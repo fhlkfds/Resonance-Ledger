@@ -8,8 +8,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: '1'
+
 jobs:
+  # Static checks and the unit suite, including the risk-based coverage gate.
   foundation:
+    name: Format, lint, typecheck, unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,5 +30,195 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm run test:unit
+      # Fails below 90% branch coverage on crypto, normalization, dates, auth.
+      - run: npm run test:coverage
+      - run: npm run build:worker
       - run: npm run build
+      - name: Upload coverage summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: coverage/coverage-summary.json
+          if-no-files-found: ignore
+
+  # Shell contract for the operator scripts.
+  scripts:
+    name: ShellCheck and Bats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: bash -n scripts/deploy.sh && bash -n scripts/backup.sh
+      - run: npm run lint:shell
+      - run: npm run test:shell
+
+  # Migrations from zero plus repository, sync, statistics, and retention
+  # behaviour against a real PostgreSQL 18 via Testcontainers.
+  integration:
+    name: Integration against PostgreSQL 18
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run test:integration
+
+  # Both image targets must build from a clean context with no .env present.
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build runtime target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: resonance-ledger:ci
+          build-args: |
+            APP_VERSION=ci-${{ github.sha }}
+            VCS_REF=${{ github.sha }}
+      - name: Build migrator target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: migrator
+          push: false
+          load: true
+          tags: resonance-ledger-migrator:ci
+      - name: Runtime image runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id resonance-ledger:ci -u)"
+          test "$uid" = "10001" || { echo "expected uid 10001, got ${uid}"; exit 1; }
+      - name: Runtime image carries no secret, source map, or test fixture
+        run: |
+          docker run --rm --entrypoint sh resonance-ledger:ci -c '
+            test ! -e /app/.env || { echo ".env present"; exit 1; }
+            test ! -d /app/tests || { echo "tests present"; exit 1; }
+            test ! -d /app/.git || { echo ".git present"; exit 1; }
+            test "$(find /app -name "*.map" -type f | wc -l)" = "0" || { echo "source maps present"; exit 1; }
+          '
+
+  # A fresh volume must reach a fully healthy stack: postgres healthy,
+  # migrate exited 0, app and worker healthy, and no published database port.
+  compose:
+    name: Compose startup on a fresh volume
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Generate a placeholder-free test environment
+        run: |
+          python3 - <<'PY'
+          import base64, os, secrets, pathlib
+          pw = secrets.token_urlsafe(24)
+          key = lambda: base64.b64encode(os.urandom(32)).decode()
+          pathlib.Path('.env').write_text(f"""NODE_ENV=production
+          APP_URL=https://music.resonance.test
+          PORT=3000
+          HOST_PORT=3000
+          BIND_ADDRESS=127.0.0.1
+          POSTGRES_DB=resonance
+          POSTGRES_USER=resonance
+          POSTGRES_PASSWORD={pw}
+          DATABASE_URL=postgresql://resonance:{pw}@postgres:5432/resonance?schema=public
+          SPOTIFY_CLIENT_ID={secrets.token_hex(16)}
+          SPOTIFY_CLIENT_SECRET={secrets.token_hex(20)}
+          SPOTIFY_REDIRECT_URI=https://music.resonance.test/api/auth/callback
+          SESSION_SECRET={key()}
+          TOKEN_ENCRYPTION_KEY={key()}
+          TOKEN_ENCRYPTION_KEY_VERSION=v1
+          SYNC_INTERVAL_SECONDS=180
+          SYNC_OVERLAP_SECONDS=300
+          DATA_RETENTION_DAYS=730
+          SYNC_RUN_RETENTION_DAYS=90
+          LOG_LEVEL=info
+          TRUST_PROXY=1
+          TZ=UTC
+          APP_IMAGE=resonance-ledger
+          APP_VERSION=0.1.0
+          BACKUP_DIR=/tmp/resonance-backups
+          BACKUP_RETENTION_DAYS=30
+          BACKUP_BEFORE_DEPLOY=false
+          """.replace('          ', ''))
+          os.chmod('.env', 0o600)
+          PY
+      - run: node scripts/validate-env.mjs .env
+      - run: docker compose --env-file .env config --quiet
+      - name: Start the stack on a fresh volume
+        run: docker compose -p ci --env-file .env up -d --wait --wait-timeout 300
+      - name: Migration job exited 0
+        run: |
+          code="$(docker inspect -f '{{.State.ExitCode}}' ci-migrate-1)"
+          test "$code" = "0" || { echo "migrate exited ${code}"; exit 1; }
+      - name: PostgreSQL is not published to the host
+        run: |
+          ports="$(docker inspect -f '{{json .NetworkSettings.Ports}}' ci-postgres-1)"
+          echo "$ports" | grep -q '"5432/tcp":null' || { echo "database port is published: ${ports}"; exit 1; }
+      - name: All 13 application tables exist
+        run: |
+          count="$(docker compose -p ci --env-file .env exec -T postgres \
+            psql -U resonance -d resonance -tAc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" | tr -d '[:space:]')"
+          test "$count" = "14" || { echo "expected 14 tables including _prisma_migrations, got ${count}"; exit 1; }
+      - name: Read-only smoke test
+        run: node scripts/smoke-test.mjs http://127.0.0.1:3000
+      - name: Backup and restore drill
+        run: |
+          ./scripts/backup.sh
+          DUMP="$(ls -t /tmp/resonance-backups/resonance-ledger_*.dump | head -1)"
+          docker compose -p ci --env-file .env exec -T postgres \
+            psql -U resonance -d postgres -q -c "CREATE DATABASE restore_drill;"
+          docker compose -p ci --env-file .env exec -T postgres sh -c 'cat > /tmp/drill.dump' < "$DUMP"
+          docker compose -p ci --env-file .env exec -T postgres \
+            pg_restore -U resonance -d restore_drill --no-owner /tmp/drill.dump
+          restored="$(docker compose -p ci --env-file .env exec -T postgres \
+            psql -U resonance -d restore_drill -tAc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" | tr -d '[:space:]')"
+          test "$restored" = "14" || { echo "restored ${restored} tables"; exit 1; }
+      - name: No secret value appears in container logs
+        run: |
+          set -a; . ./.env; set +a
+          logs="$(docker compose -p ci --env-file .env logs 2>&1)"
+          for value in "$POSTGRES_PASSWORD" "$SPOTIFY_CLIENT_SECRET" "$SESSION_SECRET" "$TOKEN_ENCRYPTION_KEY"; do
+            if printf '%s' "$logs" | grep -qF -- "$value"; then
+              echo "a secret value leaked into container logs"
+              exit 1
+            fi
+          done
+      - name: Restart is idempotent and preserves data
+        run: |
+          before="$(docker compose -p ci --env-file .env exec -T postgres \
+            psql -U resonance -d resonance -tAc "SELECT count(*) FROM listening_history;" | tr -d '[:space:]')"
+          docker compose -p ci --env-file .env restart app worker
+          docker compose -p ci --env-file .env up -d --wait --wait-timeout 180
+          after="$(docker compose -p ci --env-file .env exec -T postgres \
+            psql -U resonance -d resonance -tAc "SELECT count(*) FROM listening_history;" | tr -d '[:space:]')"
+          test "$before" = "$after" || { echo "history changed across restart: ${before} then ${after}"; exit 1; }
+      - name: Sanitized diagnostics on failure
+        if: failure()
+        run: |
+          docker compose -p ci --env-file .env ps -a || true
+          docker compose -p ci --env-file .env logs --tail 80 app worker migrate || true
+      - name: Stop the stack
+        if: always()
+        # Containers and networks only. The volume is left for the runner to
+        # discard, so this never models a volume-destroying command.
+        run: docker compose -p ci --env-file .env down || true
