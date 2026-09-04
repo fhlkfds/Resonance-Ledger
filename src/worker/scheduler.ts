@@ -64,6 +64,7 @@ export async function runScheduler(
         lease.spotifyAccountId,
         workerId,
         environment,
+        signal,
       );
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 30_000);

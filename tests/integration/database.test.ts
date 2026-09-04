@@ -20,7 +20,12 @@ import {
   heartbeatLease,
   leaseNextDueAccount,
 } from '@/lib/db/repositories/sync';
-import { persistSyncBatch, recordSyncFailure } from '@/lib/spotify/persist';
+import {
+  LEASE_LOST_ERROR_CLASS,
+  persistSyncBatch,
+  recordSyncFailure,
+} from '@/lib/spotify/persist';
+import { syncLeasedAccount } from '@/worker/sync-account';
 import { validAccessToken } from '@/lib/spotify/access-token';
 import { decryptToken, encryptToken } from '@/lib/crypto/token-envelope';
 import { parseEnvironment } from '@/lib/env';
@@ -390,6 +395,267 @@ describe('synchronization persistence', () => {
       spotifyAccountId: account.id,
       leaseOwner: 'replacement-worker',
     });
+  });
+
+  /**
+   * H3: heartbeatLease had no production caller. A run is up to ten pages with
+   * five attempts each and backoff between them, so the 120s lease expired
+   * mid-run, a second worker was granted one, and the first run's entire batch
+   * was discarded with no SyncRun row, no failure counter, and no gap warning.
+   */
+  it('renews the lease across pages and aborts with lease_lost when it is stolen', async () => {
+    const key = Buffer.alloc(32, 11);
+    const environment = parseEnvironment({
+      NODE_ENV: 'test',
+      APP_URL: 'https://listen.test',
+      PORT: '3000',
+      POSTGRES_DB: 'resonance',
+      POSTGRES_USER: 'resonance',
+      POSTGRES_PASSWORD: 'integration-database-password',
+      DATABASE_URL: 'postgresql://resonance:password@postgres:5432/resonance',
+      SPOTIFY_CLIENT_ID: 'client-id',
+      SPOTIFY_CLIENT_SECRET: 'integration-client-secret-long',
+      SPOTIFY_REDIRECT_URI: 'https://listen.test/api/auth/callback',
+      SESSION_SECRET: Buffer.alloc(32, 12).toString('base64'),
+      TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+      TOKEN_ENCRYPTION_KEY_VERSION: 'v1',
+      SYNC_INTERVAL_SECONDS: '180',
+      SYNC_OVERLAP_SECONDS: '300',
+      DATA_RETENTION_DAYS: '730',
+      TRUST_PROXY: '1',
+      APP_VERSION: 'test',
+    });
+
+    async function leasedAccount(suffix: string) {
+      const user = await database.user.create({ data: { status: 'ACTIVE' } });
+      const accountId = crypto.randomUUID();
+      const far = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      await database.spotifyAccount.create({
+        data: {
+          id: accountId,
+          userId: user.id,
+          spotifyAccountId: `lease-run-${suffix}`,
+          accessTokenEnvelope: encryptToken(
+            'fresh-access',
+            { accountId, type: 'access', version: 'v1' },
+            key,
+          ),
+          refreshTokenEnvelope: encryptToken(
+            'fresh-refresh',
+            { accountId, type: 'refresh', version: 'v1' },
+            key,
+          ),
+          // Comfortably beyond the 5 minute skew, so no HTTP refresh happens.
+          accessTokenExpiresAt: far,
+          refreshTokenExpiresAt: far,
+          scopes: ['user-read-private', 'user-read-recently-played'],
+          syncState: { create: { nextSyncAt: new Date(0) } },
+        },
+      });
+      const lease = await leaseNextDueAccount(database, `worker-${suffix}`);
+      expect(lease?.spotifyAccountId).toBe(accountId);
+      return { accountId, workerId: `worker-${suffix}` };
+    }
+
+    /** A fake slow provider: `pages` pages, each linking to the next. */
+    function slowProvider(pages: number, onPage?: () => Promise<void>) {
+      let served = 0;
+      return (async () => {
+        served += 1;
+        await onPage?.();
+        const next =
+          served < pages
+            ? `https://api.spotify.com/v1/me/player/recently-played?after=${served}`
+            : null;
+        return new Response(
+          JSON.stringify({
+            items: [spotifyItem({ played_at: `2026-09-0${served}T00:00:00Z` })],
+            next,
+            cursors: { after: String(served) },
+          }),
+          { status: 200 },
+        );
+      }) as unknown as typeof fetch;
+    }
+
+    // 1. A lease that lapses before the run finishes. The provider is slow
+    //    enough that only a real heartbeat can carry the run past the expiry
+    //    -- the 120s-lease-versus-long-run case in miniature.
+    const alive = await leasedAccount('alive');
+    await database.syncState.update({
+      where: { spotifyAccountId: alive.accountId },
+      data: { leaseExpiresAt: new Date(Date.now() + 300) },
+    });
+    await syncLeasedAccount(
+      database,
+      alive.accountId,
+      alive.workerId,
+      environment,
+      undefined,
+      {
+        fetcher: slowProvider(
+          3,
+          () => new Promise((resolve) => setTimeout(resolve, 200)),
+        ),
+        sleep: async () => undefined,
+        random: () => 0,
+      },
+    );
+    const aliveRuns = await database.syncRun.findMany({
+      where: { spotifyAccountId: alive.accountId },
+    });
+    expect(aliveRuns).toHaveLength(1);
+    expect(aliveRuns[0]!.outcome).toBe('SUCCEEDED');
+    expect(aliveRuns[0]!.pagesFetched).toBe(3);
+    expect(
+      await database.listeningHistory.count({
+        where: { spotifyAccountId: alive.accountId },
+      }),
+    ).toBe(3);
+
+    // 2. Now steal the lease between pages, exactly as an expiry-and-reclaim
+    //    would. The run must abort and leave a lease_lost record behind.
+    const lost = await leasedAccount('lost');
+    let pagesServed = 0;
+    await syncLeasedAccount(
+      database,
+      lost.accountId,
+      lost.workerId,
+      environment,
+      undefined,
+      {
+        fetcher: slowProvider(5, async () => {
+          pagesServed += 1;
+          if (pagesServed === 2) {
+            // The lease lapses and a replacement worker claims it.
+            await database.syncState.update({
+              where: { spotifyAccountId: lost.accountId },
+              data: {
+                leaseOwner: 'replacement-worker',
+                leaseExpiresAt: new Date(Date.now() + 120_000),
+              },
+            });
+          }
+        }),
+        sleep: async () => undefined,
+        random: () => 0,
+      },
+    );
+
+    // The batch was abandoned rather than written.
+    expect(
+      await database.listeningHistory.count({
+        where: { spotifyAccountId: lost.accountId },
+      }),
+    ).toBe(0);
+    // ...and the discarded work is visible to the operator.
+    const lostRuns = await database.syncRun.findMany({
+      where: { spotifyAccountId: lost.accountId },
+    });
+    expect(lostRuns).toHaveLength(1);
+    expect(lostRuns[0]!.errorClass).toBe(LEASE_LOST_ERROR_CLASS);
+    // The replacement worker's lease was not clobbered on the way out.
+    const lostState = await database.syncState.findUniqueOrThrow({
+      where: { spotifyAccountId: lost.accountId },
+    });
+    expect(lostState.leaseOwner).toBe('replacement-worker');
+    // The run stopped early instead of walking all five pages.
+    expect(pagesServed).toBeLessThan(5);
+  });
+
+  /**
+   * H4: Retry-After was honoured with no ceiling and no attempt counter, so a
+   * hostile `Retry-After: 86400` parked the worker for a day on a held lease.
+   * A rate limit now ends the run as a deferral with the cursor untouched.
+   */
+  it('ends a rate-limited run as RATE_LIMITED and preserves the cursor', async () => {
+    const key = Buffer.alloc(32, 13);
+    const environment = parseEnvironment({
+      NODE_ENV: 'test',
+      APP_URL: 'https://listen.test',
+      PORT: '3000',
+      POSTGRES_DB: 'resonance',
+      POSTGRES_USER: 'resonance',
+      POSTGRES_PASSWORD: 'integration-database-password',
+      DATABASE_URL: 'postgresql://resonance:password@postgres:5432/resonance',
+      SPOTIFY_CLIENT_ID: 'client-id',
+      SPOTIFY_CLIENT_SECRET: 'integration-client-secret-long',
+      SPOTIFY_REDIRECT_URI: 'https://listen.test/api/auth/callback',
+      SESSION_SECRET: Buffer.alloc(32, 14).toString('base64'),
+      TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+      TOKEN_ENCRYPTION_KEY_VERSION: 'v1',
+      SYNC_INTERVAL_SECONDS: '180',
+      SYNC_OVERLAP_SECONDS: '300',
+      DATA_RETENTION_DAYS: '730',
+      TRUST_PROXY: '1',
+      APP_VERSION: 'test',
+    });
+    const cursor = new Date('2026-09-01T00:00:00.000Z');
+    const user = await database.user.create({ data: { status: 'ACTIVE' } });
+    const accountId = crypto.randomUUID();
+    const far = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+    await database.spotifyAccount.create({
+      data: {
+        id: accountId,
+        userId: user.id,
+        spotifyAccountId: 'rate-limited-run',
+        accessTokenEnvelope: encryptToken(
+          'fresh-access',
+          { accountId, type: 'access', version: 'v1' },
+          key,
+        ),
+        refreshTokenEnvelope: encryptToken(
+          'fresh-refresh',
+          { accountId, type: 'refresh', version: 'v1' },
+          key,
+        ),
+        accessTokenExpiresAt: far,
+        refreshTokenExpiresAt: far,
+        scopes: ['user-read-private', 'user-read-recently-played'],
+        syncState: {
+          create: { nextSyncAt: new Date(0), cursorPlayedAt: cursor },
+        },
+      },
+    });
+    const lease = await leaseNextDueAccount(database, 'worker-429');
+    expect(lease?.spotifyAccountId).toBe(accountId);
+
+    const started = Date.now();
+    let requests = 0;
+    await syncLeasedAccount(
+      database,
+      accountId,
+      'worker-429',
+      environment,
+      undefined,
+      {
+        // A hostile day-long Retry-After on every attempt.
+        fetcher: (async () => {
+          requests += 1;
+          return new Response('', {
+            status: 429,
+            headers: { 'Retry-After': '86400' },
+          });
+        }) as unknown as typeof fetch,
+        random: () => 0,
+      },
+    );
+    // No real sleep was injected, so a missing ceiling would have hung here.
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(requests).toBe(1);
+
+    const runs = await database.syncRun.findMany({
+      where: { spotifyAccountId: accountId },
+    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBe('RATE_LIMITED');
+    const state = await database.syncState.findUniqueOrThrow({
+      where: { spotifyAccountId: accountId },
+    });
+    expect(state.cursorPlayedAt).toEqual(cursor);
+    expect(state.leaseOwner).toBeNull();
+    // The remainder is deferred rather than slept through.
+    expect(state.nextSyncAt.getTime()).toBeGreaterThan(Date.now() + 60_000);
   });
 
   it('serializes refresh, preserves an omitted refresh token, and persists NEEDS_REAUTH', async () => {

@@ -6,6 +6,21 @@ import {
 } from './normalize';
 import type { SpotifyPlayedItem } from './schemas';
 
+/**
+ * Error class recorded on a SyncRun when a run's lease was taken from under
+ * it. Distinct from an ordinary failure because the work of that run was
+ * *discarded* -- the operator has to be able to see that.
+ */
+export const LEASE_LOST_ERROR_CLASS = 'lease_lost';
+
+/** Raised when a run no longer holds the lease it started with. */
+export class LeaseLostError extends Error {
+  constructor(message = 'Sync lease is not owned or has expired') {
+    super(message);
+    this.name = 'LeaseLostError';
+  }
+}
+
 function deterministicJitter(accountId: string): number {
   let hash = 0;
   for (const character of accountId)
@@ -163,7 +178,7 @@ export async function persistSyncBatch(
       !state.leaseExpiresAt ||
       state.leaseExpiresAt <= now
     )
-      throw new Error('Sync lease is not owned or has expired');
+      throw new LeaseLostError();
     let inserted = 0;
     for (const play of plays) {
       const trackId = await upsertNormalizedTrack(transaction, play.track, now);
@@ -246,26 +261,89 @@ export async function recordSyncFailure(
     const state = await transaction.syncState.findUnique({
       where: { spotifyAccountId: accountId },
     });
-    if (!state || state.leaseOwner !== workerId) return;
-    const failures = state.consecutiveFailures + 1;
-    const backoff = Math.min(60_000, 1_000 * 2 ** Math.min(failures - 1, 6));
-    await transaction.syncState.update({
-      where: { spotifyAccountId: accountId },
-      data: {
-        status: 'BACKOFF',
-        consecutiveFailures: failures,
-        nextSyncAt: new Date(now.getTime() + backoff),
-        leaseOwner: null,
-        leaseExpiresAt: null,
-      },
-    });
+    // The account itself is gone; there is nothing left to attribute the run
+    // to. This is the only path that records nothing.
+    if (!state) return;
+    // A foreign lease owner means our 120s lease expired mid-run and another
+    // worker took over. Previously this returned silently: no SyncRun row, no
+    // failure counter, no gap warning -- an entire batch vanished without a
+    // trace. We must not touch the new owner's state, but we must still leave
+    // the operator a record that work was discarded.
+    const foreignLease = state.leaseOwner !== workerId;
+    const leaseLost = foreignLease || errorClass === 'LeaseLostError';
+    const safeErrorClass = (
+      leaseLost ? LEASE_LOST_ERROR_CLASS : errorClass
+    ).slice(0, 100);
+
+    if (!foreignLease) {
+      const failures = state.consecutiveFailures + 1;
+      const backoff = Math.min(60_000, 1_000 * 2 ** Math.min(failures - 1, 6));
+      await transaction.syncState.update({
+        where: { spotifyAccountId: accountId },
+        data: {
+          status: 'BACKOFF',
+          consecutiveFailures: failures,
+          nextSyncAt: new Date(now.getTime() + backoff),
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        },
+      });
+    }
     await transaction.syncRun.create({
       data: {
         spotifyAccountId: accountId,
         startedAt: state.lastAttemptAt ?? now,
         finishedAt: now,
         outcome: 'FAILED',
-        errorClass: errorClass.slice(0, 100),
+        errorClass: safeErrorClass,
+        requestId,
+      },
+    });
+  });
+}
+
+/**
+ * End a run that hit a rate limit it should not wait out in process. The
+ * cursor is deliberately left untouched so the deferred run resumes from the
+ * same point, and nextSyncAt absorbs the remaining Retry-After.
+ */
+export async function recordRateLimited(
+  database: PrismaClient,
+  accountId: string,
+  workerId: string,
+  requestId: string,
+  retryAfterSeconds: number,
+  now = new Date(),
+): Promise<void> {
+  // A day-long Retry-After is honoured as a deferral, but never trusted
+  // beyond a sane ceiling.
+  const deferSeconds = Math.min(
+    6 * 60 * 60,
+    Math.max(1, Math.ceil(retryAfterSeconds)),
+  );
+  await database.$transaction(async (transaction) => {
+    const state = await transaction.syncState.findUnique({
+      where: { spotifyAccountId: accountId },
+    });
+    if (!state) return;
+    if (state.leaseOwner === workerId) {
+      await transaction.syncState.update({
+        where: { spotifyAccountId: accountId },
+        data: {
+          status: 'BACKOFF',
+          nextSyncAt: new Date(now.getTime() + deferSeconds * 1000),
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        },
+      });
+    }
+    await transaction.syncRun.create({
+      data: {
+        spotifyAccountId: accountId,
+        startedAt: state.lastAttemptAt ?? now,
+        finishedAt: now,
+        outcome: 'RATE_LIMITED',
+        errorClass: 'rate_limited',
         requestId,
       },
     });

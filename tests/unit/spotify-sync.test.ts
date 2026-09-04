@@ -117,7 +117,9 @@ describe('Spotify recently-played client', () => {
       random: () => 0.5,
       requestId: 'request',
     });
-    expect(sleep).toHaveBeenCalledWith(2500);
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+      2500,
+    ]);
   });
 
   it('retries 5xx with capped full jitter and stops after five attempts', async () => {
