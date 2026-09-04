@@ -84,7 +84,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     const metrics = z
       .array(metric)
       .min(1)
-      .parse(metricValues.length ? metricValues : ['plays', 'estimatedDurationMs']);
+      .parse(
+        metricValues.length ? metricValues : ['plays', 'estimatedDurationMs'],
+      );
     const dimensions = z
       .array(dimension)
       .min(1)

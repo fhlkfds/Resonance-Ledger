@@ -1,0 +1,42 @@
+# Never ship secrets or local state into the build context.
+.env
+.env.*
+!.env.example
+backups/
+exports/
+*.dump
+*.dump.failed
+token-key*
+
+# Version control and CI metadata.
+.git
+.gitignore
+.github
+
+# Build and dependency output rebuilt inside the image.
+node_modules
+.next
+dist
+coverage
+playwright-report
+test-results
+*.tsbuildinfo
+
+# Tests and fixtures do not belong in a runtime image.
+tests
+playwright.config.ts
+vitest.config.ts
+vitest.integration.config.ts
+
+# Editor and OS noise.
+.DS_Store
+*.log
+.vscode
+.idea
+
+# Documentation is served from the repository, not the container.
+# LICENSE is deliberately kept: the runtime image ships its license notice.
+docs
+README.md
+AGENTS.md
+CLAUDE.md

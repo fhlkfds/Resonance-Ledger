@@ -9,10 +9,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:worker": "esbuild src/worker/index.ts src/worker/healthcheck.ts --bundle --platform=node --target=node24 --format=esm --outdir=dist/worker --packages=external",
+    "build:worker": "node scripts/build-worker.mjs",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -20,7 +20,8 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "test:coverage": "vitest run --coverage",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "typegen": "next typegen"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",

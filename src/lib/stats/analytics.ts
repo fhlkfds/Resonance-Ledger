@@ -89,7 +89,15 @@ function distribution(values: RankedEntity[], limit: number) {
     denominator: total,
     items:
       used < total
-        ? [...top, { id: null, name: 'Other', plays: total - used, share: (total - used) / total }]
+        ? [
+            ...top,
+            {
+              id: null,
+              name: 'Other',
+              plays: total - used,
+              share: (total - used) / total,
+            },
+          ]
         : top,
   };
 }
@@ -161,12 +169,7 @@ export async function analyticsData(
   for (const event of events) {
     const parts = utcToZonedParts(event.playedAt, range.timezone);
     const timeLabel = bucketLabel(
-      startOfBucket(
-        event.playedAt,
-        range.timezone,
-        granularity,
-        weekStartsOn,
-      ),
+      startOfBucket(event.playedAt, range.timezone, granularity, weekStartsOn),
       range.timezone,
       granularity,
     );
@@ -176,7 +179,11 @@ export async function analyticsData(
       parts.hour.toString().padStart(2, '0'),
       event.estimatedDurationMs,
     );
-    increment(weekdays, weekdayNames[parts.weekday]!, event.estimatedDurationMs);
+    increment(
+      weekdays,
+      weekdayNames[parts.weekday]!,
+      event.estimatedDurationMs,
+    );
     increment(months, monthNames[parts.month - 1]!, event.estimatedDurationMs);
     const year = yearDays.get(parts.year) ?? new Map<string, MetricPoint>();
     increment(
@@ -201,10 +208,9 @@ export async function analyticsData(
   const rankedTracks = [...tracks.values()].sort(rankOrder);
   const rankedAlbums = [...albums.values()].sort(rankOrder);
   const rankedArtists = [...artists.values()].sort(rankOrder);
-  const selectedYears =
-    options.years?.length
-      ? [...new Set(options.years)].sort((a, b) => a - b)
-      : [...yearDays.keys()].sort((a, b) => a - b);
+  const selectedYears = options.years?.length
+    ? [...new Set(options.years)].sort((a, b) => a - b)
+    : [...yearDays.keys()].sort((a, b) => a - b);
   const weekdayOrder = Array.from(
     { length: 7 },
     (_, index) => weekdayNames[(weekStartsOn + index) % 7]!,
@@ -221,7 +227,10 @@ export async function analyticsData(
       uniqueTracks: tracks.size,
       uniqueAlbums: albums.size,
       uniqueArtists: artists.size,
-      artistPlayCredits: rankedArtists.reduce((sum, item) => sum + item.plays, 0),
+      artistPlayCredits: rankedArtists.reduce(
+        (sum, item) => sum + item.plays,
+        0,
+      ),
     },
     time: timeFrom
       ? enumerateBuckets(
@@ -243,7 +252,9 @@ export async function analyticsData(
       : [],
     hourly: Array.from({ length: 24 }, (_, hour) => {
       const label = hour.toString().padStart(2, '0');
-      return hours.get(label) ?? { bucket: label, plays: 0, estimatedDurationMs: 0 };
+      return (
+        hours.get(label) ?? { bucket: label, plays: 0, estimatedDurationMs: 0 }
+      );
     }),
     weekday: weekdayOrder.map(
       (label) =>

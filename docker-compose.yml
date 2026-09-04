@@ -1,0 +1,114 @@
+name: resonance-ledger
+
+# Three long-running services plus a one-shot migration gate.
+# PostgreSQL is never published to the host; the app binds to loopback and
+# expects an operator-provided HTTPS reverse proxy in front of it.
+
+x-runtime: &runtime
+  build:
+    context: .
+    target: runtime
+    args:
+      APP_VERSION: ${APP_VERSION:-local}
+  image: ${APP_IMAGE:-resonance-ledger}:${APP_VERSION:-local}
+  env_file: [.env]
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  stop_grace_period: 30s
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:63bdc97d67b5133bf0e5ebd500bec6d046fa851dc81340d838f0347e616107e8
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      # PostgreSQL 18 images store data in a major-version subdirectory and
+      # reject a mount at /var/lib/postgresql/data. Mounting the parent is the
+      # layout the image documents for 18+, and it keeps `pg_upgrade --link`
+      # possible without crossing a mount boundary.
+      - postgres_data:/var/lib/postgresql
+    networks: [database]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  migrate:
+    build:
+      context: .
+      target: migrator
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    image: ${APP_IMAGE:-resonance-ledger}-migrator:${APP_VERSION:-local}
+    env_file: [.env]
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+    restart: 'no'
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database]
+
+  app:
+    <<: *runtime
+    command: ['node', 'server.js']
+    ports:
+      - '${BIND_ADDRESS:-127.0.0.1}:${HOST_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [egress, database]
+    healthcheck:
+      test: [CMD, 'node', 'scripts/container-app-health.mjs']
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  worker:
+    <<: *runtime
+    command: ['node', 'dist/worker/index.mjs']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [egress, database]
+    healthcheck:
+      test: [CMD, 'node', 'dist/worker/healthcheck.mjs']
+      interval: 30s
+      timeout: 10s
+      retries: 4
+      start_period: 45s
+
+volumes:
+  postgres_data:
+
+networks:
+  egress:
+    driver: bridge
+  database:
+    driver: bridge
+    internal: true
