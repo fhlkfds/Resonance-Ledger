@@ -32,19 +32,20 @@ export function entityListHandler(
       entityListSchema,
     );
     const offset = decodeOffsetCursor(query.cursor);
-    const rows = await rankedEntities(
+    // Ranking and pagination happen in the query; nothing beyond this page is
+    // ever loaded.
+    const { items, hasMore } = await rankedEntities(
       database,
       session.userId,
       range,
       kind,
       query.q,
       query.sort,
+      { limit: query.limit, offset },
     );
-    const items = rows.slice(offset, offset + query.limit);
-    const nextCursor =
-      offset + query.limit < rows.length
-        ? encodeOffsetCursor(offset + query.limit)
-        : null;
+    const nextCursor = hasMore
+      ? encodeOffsetCursor(offset + query.limit)
+      : null;
     return jsonResponse(items, requestId, {
       timezone: range.timezone,
       range,

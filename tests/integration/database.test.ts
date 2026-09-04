@@ -1106,9 +1106,37 @@ describe('tenant-scoped API repositories', () => {
       'BEYONCE',
       'plays',
     );
-    expect(artists).toMatchObject([
+    expect(artists.items).toMatchObject([
       { id: artist.id, plays: 2, estimatedDurationMs: 300 },
     ]);
+    // H5: search, ranking, and pagination now all happen in the query, so a
+    // page is a page -- not a slice of the whole materialised history.
+    expect(artists.hasMore).toBe(false);
+    const firstArtistPage = await rankedEntities(
+      database,
+      userA.id,
+      range,
+      'artist',
+      undefined,
+      'plays',
+      { limit: 1 },
+    );
+    expect(firstArtistPage.items).toHaveLength(1);
+    expect(firstArtistPage.hasMore).toBe(true);
+    const secondArtistPage = await rankedEntities(
+      database,
+      userA.id,
+      range,
+      'artist',
+      undefined,
+      'plays',
+      { limit: 1, offset: 1 },
+    );
+    expect(secondArtistPage.items).toHaveLength(1);
+    expect(secondArtistPage.items[0]!.id).not.toBe(
+      firstArtistPage.items[0]!.id,
+    );
+    expect(secondArtistPage.hasMore).toBe(false);
     const dashboard = await dashboardData(database, userA.id, range);
     expect(dashboard.totals).toEqual({
       plays: 2,
@@ -1179,6 +1207,73 @@ describe('tenant-scoped API repositories', () => {
       estimatedDurationMs: 10_000_000,
     });
     expect(elapsed).toBeLessThan(5000);
+  });
+});
+
+describe('statistics aggregate in SQL, not in Node', () => {
+  /**
+   * H5: the dashboard, entity lists, analytics, year-over-year, and entity
+   * details each loaded the user's whole matching history into Node with no
+   * `take` and no aggregation. This asserts the structural fix: every
+   * statement the statistics path issues against listening_history is an
+   * aggregate or a bounded read, so only grouped rows cross the boundary.
+   */
+  it('issues only aggregating or LIMIT-ed statements against the events table', async () => {
+    const logged = new PrismaClient({
+      datasources: { db: { url: container.getConnectionUri() } },
+      log: [{ emit: 'event', level: 'query' }],
+    });
+    const statements: string[] = [];
+    logged.$on('query', (event) => statements.push(event.query));
+    try {
+      const user = await logged.user.create({
+        data: {
+          status: 'ACTIVE',
+          settings: { create: { timezone: 'UTC', weekStartsOn: 1 } },
+        },
+      });
+      const range = resolveRange({
+        preset: 'CUSTOM',
+        timezone: 'UTC',
+        weekStartsOn: 1,
+        now: new Date('2026-03-10T12:00:00Z'),
+        customFrom: '2026-01-01',
+        customTo: '2026-03-01',
+      });
+      statements.length = 0;
+      await dashboardData(logged, user.id, range, undefined, 1);
+      await analyticsData(logged, user.id, range, 1, {
+        rankingLimit: 10,
+        distributionLimit: 5,
+      });
+      await rankedEntities(
+        logged,
+        user.id,
+        range,
+        'artist',
+        undefined,
+        'plays',
+        {
+          limit: 25,
+        },
+      );
+
+      const eventReads = statements.filter(
+        (statement) =>
+          /\blistening_history\b/i.test(statement) &&
+          /^\s*(WITH|SELECT)/i.test(statement),
+      );
+      expect(eventReads.length).toBeGreaterThan(0);
+      const unbounded = eventReads.filter(
+        (statement) =>
+          !/GROUP BY/i.test(statement) &&
+          !/COUNT\(|SUM\(|MIN\(|MAX\(/i.test(statement) &&
+          !/\bLIMIT\b/i.test(statement),
+      );
+      expect(unbounded).toEqual([]);
+    } finally {
+      await logged.$disconnect();
+    }
   });
 });
 

@@ -51,19 +51,18 @@ export async function EntityIndexPage({
     settings,
   );
   const offset = decodeOffsetCursor(parsed.cursor);
-  const ranked = await rankedEntities(
+  // Ranking and pagination happen in the query; nothing beyond this page is
+  // ever loaded.
+  const { items, hasMore } = await rankedEntities(
     database,
     session.userId,
     range,
     kind,
     parsed.q,
     parsed.sort,
+    { limit: parsed.limit, offset },
   );
-  const items = ranked.slice(offset, offset + parsed.limit);
-  const nextCursor =
-    offset + parsed.limit < ranked.length
-      ? encodeOffsetCursor(offset + parsed.limit)
-      : null;
+  const nextCursor = hasMore ? encodeOffsetCursor(offset + parsed.limit) : null;
   const definition = labels[kind];
   const nextParams = new URLSearchParams();
   for (const [key, value] of Object.entries(raw))

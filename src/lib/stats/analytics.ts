@@ -1,107 +1,34 @@
-import type { Prisma, PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import {
   adaptiveGranularity,
-  bucketLabel,
-  enumerateBuckets,
-  startOfBucket,
-  utcToZonedParts,
   zonedPartsToUtc,
+  enumerateBuckets,
+  bucketLabel,
   type Granularity,
   type ResolvedRange,
 } from './dates';
-import type { RankedEntity } from './queries';
+import {
+  calendarBuckets,
+  distributionDenominator,
+  playedAtBounds,
+  rankedEntityPage,
+  timeBuckets,
+  totalsAggregate,
+  yearDayBuckets,
+  type BucketPoint,
+} from './aggregate';
+import { fillSeries } from './queries';
+import type { EntityScope, RankedEntity } from './scope';
 
-type MetricPoint = {
-  bucket: string;
-  plays: number;
-  estimatedDurationMs: number;
-};
+export { rankOrder } from './scope';
 
 type AnalyticsOptions = {
   granularity?: Granularity;
   rankingLimit?: number;
   distributionLimit?: number;
   years?: number[];
-  entity?: { kind: 'track' | 'artist' | 'album'; id: string };
+  entity?: EntityScope;
 };
-
-function eventWhere(
-  userId: string,
-  range: ResolvedRange,
-  entity?: AnalyticsOptions['entity'],
-): Prisma.ListeningHistoryWhereInput {
-  return {
-    spotifyAccount: { userId },
-    playedAt: { ...(range.from ? { gte: range.from } : {}), lt: range.to },
-    ...(entity?.kind === 'track' ? { trackId: entity.id } : {}),
-    ...(entity?.kind === 'album' ? { track: { albumId: entity.id } } : {}),
-    ...(entity?.kind === 'artist'
-      ? { track: { artists: { some: { artistId: entity.id } } } }
-      : {}),
-  };
-}
-
-function increment(
-  map: Map<string, MetricPoint>,
-  bucket: string,
-  duration: number,
-) {
-  const point = map.get(bucket) ?? {
-    bucket,
-    plays: 0,
-    estimatedDurationMs: 0,
-  };
-  point.plays += 1;
-  point.estimatedDurationMs += duration;
-  map.set(bucket, point);
-}
-
-function addEntity(
-  map: Map<string, RankedEntity>,
-  entity: { id: string; name: string; normalizedName: string },
-  duration: number,
-) {
-  const value = map.get(entity.id) ?? {
-    ...entity,
-    plays: 0,
-    estimatedDurationMs: 0,
-  };
-  value.plays += 1;
-  value.estimatedDurationMs += duration;
-  map.set(entity.id, value);
-}
-
-export const rankOrder = (left: RankedEntity, right: RankedEntity) =>
-  right.plays - left.plays ||
-  right.estimatedDurationMs - left.estimatedDurationMs ||
-  left.normalizedName.localeCompare(right.normalizedName) ||
-  left.id.localeCompare(right.id);
-
-function distribution(values: RankedEntity[], limit: number) {
-  const total = values.reduce((sum, item) => sum + item.plays, 0);
-  const top = values.slice(0, limit).map((item) => ({
-    id: item.id,
-    name: item.name,
-    plays: item.plays,
-    share: total ? item.plays / total : 0,
-  }));
-  const used = top.reduce((sum, item) => sum + item.plays, 0);
-  return {
-    denominator: total,
-    items:
-      used < total
-        ? [
-            ...top,
-            {
-              id: null,
-              name: 'Other',
-              plays: total - used,
-              share: (total - used) / total,
-            },
-          ]
-        : top,
-  };
-}
 
 const weekdayNames = [
   'Sunday',
@@ -127,6 +54,43 @@ const monthNames = [
   'December',
 ];
 
+const emptyPoint = (bucket: string): BucketPoint => ({
+  bucket,
+  plays: 0,
+  estimatedDurationMs: 0,
+});
+
+/**
+ * Build the top-N slice plus an "Other" remainder.
+ *
+ * The denominator is every credited play in scope, counted in SQL, so the
+ * shares stay correct without ranking every entity in memory.
+ */
+function distribution(top: RankedEntity[], denominator: number, limit: number) {
+  const items = top.slice(0, limit).map((item) => ({
+    id: item.id as string | null,
+    name: item.name,
+    plays: item.plays,
+    share: denominator ? item.plays / denominator : 0,
+  }));
+  const used = items.reduce((sum, item) => sum + item.plays, 0);
+  return {
+    denominator,
+    items:
+      used < denominator
+        ? [
+            ...items,
+            {
+              id: null,
+              name: 'Other',
+              plays: denominator - used,
+              share: (denominator - used) / denominator,
+            },
+          ]
+        : items,
+  };
+}
+
 export async function analyticsData(
   database: PrismaClient,
   userId: string,
@@ -134,202 +98,131 @@ export async function analyticsData(
   weekStartsOn: number,
   options: AnalyticsOptions = {},
 ) {
-  const events = await database.listeningHistory.findMany({
-    where: eventWhere(userId, range, options.entity),
-    select: {
-      playedAt: true,
-      estimatedDurationMs: true,
-      track: {
-        select: {
-          id: true,
-          name: true,
-          normalizedName: true,
-          album: { select: { id: true, name: true, normalizedName: true } },
-          artists: {
-            select: {
-              artist: {
-                select: { id: true, name: true, normalizedName: true },
-              },
-            },
-          },
-        },
-      },
-    },
-  });
   const granularity =
     options.granularity ?? adaptiveGranularity(range.from, range.to);
-  const time = new Map<string, MetricPoint>();
-  const hours = new Map<string, MetricPoint>();
-  const weekdays = new Map<string, MetricPoint>();
-  const hourWeekdays = new Map<string, MetricPoint>();
-  const months = new Map<string, MetricPoint>();
-  const yearDays = new Map<number, Map<string, MetricPoint>>();
-  const tracks = new Map<string, RankedEntity>();
-  const albums = new Map<string, RankedEntity>();
-  const artists = new Map<string, RankedEntity>();
+  const rankingLimit = options.rankingLimit ?? 25;
+  const distributionLimit = options.distributionLimit ?? 10;
+  const entity = options.entity;
+  // The distribution "Other" bucket needs a top slice at least as long as the
+  // ranking, so one query serves both.
+  const topLimit = Math.max(rankingLimit, distributionLimit);
 
-  for (const event of events) {
-    const parts = utcToZonedParts(event.playedAt, range.timezone);
-    const timeLabel = bucketLabel(
-      startOfBucket(event.playedAt, range.timezone, granularity, weekStartsOn),
-      range.timezone,
-      granularity,
-    );
-    increment(time, timeLabel, event.estimatedDurationMs);
-    increment(
-      hours,
-      parts.hour.toString().padStart(2, '0'),
-      event.estimatedDurationMs,
-    );
-    increment(
-      weekdays,
-      weekdayNames[parts.weekday]!,
-      event.estimatedDurationMs,
-    );
-    increment(
-      hourWeekdays,
-      `${weekdayNames[parts.weekday]}:${parts.hour}`,
-      event.estimatedDurationMs,
-    );
-    increment(months, monthNames[parts.month - 1]!, event.estimatedDurationMs);
-    const year = yearDays.get(parts.year) ?? new Map<string, MetricPoint>();
-    increment(
-      year,
-      `${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`,
-      event.estimatedDurationMs,
-    );
-    yearDays.set(parts.year, year);
-    addEntity(tracks, event.track, event.estimatedDurationMs);
-    if (event.track.album)
-      addEntity(albums, event.track.album, event.estimatedDurationMs);
-    for (const credit of event.track.artists)
-      addEntity(artists, credit.artist, event.estimatedDurationMs);
-  }
+  /**
+   * Every dimension is its own bounded aggregate: 24 hourly rows, 7 weekday
+   * rows, 168 hour-weekday cells, 12 month rows, one row per time bucket, and
+   * `topLimit` rows per ranking. The previous implementation loaded the whole
+   * matching history -- and, for year-over-year, up to twenty further years of
+   * it -- into Node first.
+   */
+  const [
+    totals,
+    timePoints,
+    hourPoints,
+    weekdayPoints,
+    hourWeekdayPoints,
+    monthPoints,
+    bounds,
+    rankedTracks,
+    rankedAlbums,
+    rankedArtists,
+    artistDenominator,
+    albumDenominator,
+  ] = await Promise.all([
+    totalsAggregate(database, userId, range, entity),
+    timeBuckets(database, userId, range, granularity, weekStartsOn, entity),
+    calendarBuckets(database, userId, range, 'hour', entity),
+    calendarBuckets(database, userId, range, 'weekday', entity),
+    calendarBuckets(database, userId, range, 'weekday_hour', entity),
+    calendarBuckets(database, userId, range, 'month', entity),
+    range.from
+      ? Promise.resolve({ first: null, last: null })
+      : playedAtBounds(database, userId, range, entity),
+    rankedEntityPage(database, userId, range, 'track', {
+      limit: topLimit,
+      ...(entity ? { entity } : {}),
+    }),
+    rankedEntityPage(database, userId, range, 'album', {
+      limit: topLimit,
+      ...(entity ? { entity } : {}),
+    }),
+    rankedEntityPage(database, userId, range, 'artist', {
+      limit: topLimit,
+      ...(entity ? { entity } : {}),
+    }),
+    distributionDenominator(database, userId, range, 'artist', entity),
+    distributionDenominator(database, userId, range, 'album', entity),
+  ]);
 
-  const earliest = events.reduce<Date | null>(
-    (result, event) =>
-      !result || event.playedAt < result ? event.playedAt : result,
-    null,
-  );
-  const timeFrom = range.from ?? earliest;
-  const rankedTracks = [...tracks.values()].sort(rankOrder);
-  const rankedAlbums = [...albums.values()].sort(rankOrder);
-  const rankedArtists = [...artists.values()].sort(rankOrder);
+  // Year-over-year. Without an explicit selection the years are those present
+  // in the range; with one, each selected year is read over its full calendar
+  // span, independent of the range.
+  const inRangeYears = options.years?.length
+    ? null
+    : await yearDayBuckets(database, userId, range, entity);
+  let yearDays = inRangeYears ?? new Map<number, Map<string, BucketPoint>>();
   const selectedYears = options.years?.length
-    ? [...new Set(options.years)].sort((a, b) => a - b)
-    : [...yearDays.keys()].sort((a, b) => a - b);
+    ? [...new Set(options.years)].sort((left, right) => left - right)
+    : [...yearDays.keys()].sort((left, right) => left - right);
   if (options.years?.length) {
-    const selectedYearEvents = await database.listeningHistory.findMany({
-      where: {
-        spotifyAccount: { userId },
-        OR: selectedYears.map((year) => ({
-          playedAt: {
-            gte: zonedPartsToUtc(range.timezone, year, 1, 1),
-            lt: zonedPartsToUtc(range.timezone, year + 1, 1, 1),
+    const spans = await Promise.all(
+      selectedYears.map((year) =>
+        yearDayBuckets(
+          database,
+          userId,
+          {
+            preset: 'CUSTOM',
+            from: zonedPartsToUtc(range.timezone, year, 1, 1),
+            to: zonedPartsToUtc(range.timezone, year + 1, 1, 1),
+            timezone: range.timezone,
           },
-        })),
-        ...(options.entity?.kind === 'track'
-          ? { trackId: options.entity.id }
-          : {}),
-        ...(options.entity?.kind === 'album'
-          ? { track: { albumId: options.entity.id } }
-          : {}),
-        ...(options.entity?.kind === 'artist'
-          ? {
-              track: {
-                artists: { some: { artistId: options.entity.id } },
-              },
-            }
-          : {}),
-      },
-      select: { playedAt: true, estimatedDurationMs: true },
-    });
-    yearDays.clear();
-    for (const event of selectedYearEvents) {
-      const parts = utcToZonedParts(event.playedAt, range.timezone);
-      const year = yearDays.get(parts.year) ?? new Map<string, MetricPoint>();
-      increment(
-        year,
-        `${parts.month.toString().padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`,
-        event.estimatedDurationMs,
-      );
-      yearDays.set(parts.year, year);
-    }
+          entity,
+        ),
+      ),
+    );
+    yearDays = new Map();
+    for (const span of spans)
+      for (const [year, days] of span) yearDays.set(year, days);
   }
+
   const weekdayOrder = Array.from(
     { length: 7 },
-    (_, index) => weekdayNames[(weekStartsOn + index) % 7]!,
+    (_, index) => (weekStartsOn + index) % 7,
   );
-  const totalDuration = events.reduce(
-    (sum, event) => sum + event.estimatedDurationMs,
-    0,
-  );
+  const timeFrom = range.from ?? bounds.first;
 
   return {
-    totals: {
-      plays: events.length,
-      estimatedDurationMs: totalDuration,
-      uniqueTracks: tracks.size,
-      uniqueAlbums: albums.size,
-      uniqueArtists: artists.size,
-      artistPlayCredits: rankedArtists.reduce(
-        (sum, item) => sum + item.plays,
-        0,
-      ),
-    },
+    totals,
     time: timeFrom
-      ? enumerateBuckets(
+      ? fillSeries(
+          timePoints,
           timeFrom,
           range.to,
           range.timezone,
           granularity,
           weekStartsOn,
-        ).map((start) => {
-          const label = bucketLabel(start, range.timezone, granularity);
-          return (
-            time.get(label) ?? {
-              bucket: label,
-              plays: 0,
-              estimatedDurationMs: 0,
-            }
-          );
-        })
+        )
       : [],
     hourly: Array.from({ length: 24 }, (_, hour) => {
       const label = hour.toString().padStart(2, '0');
-      return (
-        hours.get(label) ?? { bucket: label, plays: 0, estimatedDurationMs: 0 }
-      );
+      return hourPoints.get(label) ?? emptyPoint(label);
     }),
-    weekday: weekdayOrder.map(
-      (label) =>
-        weekdays.get(label) ?? {
-          bucket: label,
-          plays: 0,
-          estimatedDurationMs: 0,
-        },
-    ),
-    hourWeekday: weekdayOrder.map((weekday) => ({
-      weekday,
+    weekday: weekdayOrder.map((index) => {
+      const name = weekdayNames[index]!;
+      const point = weekdayPoints.get(String(index));
+      return point ? { ...point, bucket: name } : emptyPoint(name);
+    }),
+    hourWeekday: weekdayOrder.map((index) => ({
+      weekday: weekdayNames[index]!,
       points: Array.from({ length: 24 }, (_, hour) => {
         const label = hour.toString().padStart(2, '0');
-        return (
-          hourWeekdays.get(`${weekday}:${hour}`) ?? {
-            bucket: label,
-            plays: 0,
-            estimatedDurationMs: 0,
-          }
-        );
+        const point = hourWeekdayPoints.get(`${index}:${hour}`);
+        return point ? { ...point, bucket: label } : emptyPoint(label);
       }),
     })),
-    month: monthNames.map(
-      (label) =>
-        months.get(label) ?? {
-          bucket: label,
-          plays: 0,
-          estimatedDurationMs: 0,
-        },
-    ),
+    month: monthNames.map((name, index) => {
+      const point = monthPoints.get(String(index + 1));
+      return point ? { ...point, bucket: name } : emptyPoint(name);
+    }),
     yearOverYear: selectedYears.map((year) => ({
       year,
       points: enumerateBuckets(
@@ -340,23 +233,25 @@ export async function analyticsData(
         weekStartsOn,
       ).map((start) => {
         const label = bucketLabel(start, range.timezone, 'day').slice(5);
-        return (
-          yearDays.get(year)?.get(label) ?? {
-            bucket: label,
-            plays: 0,
-            estimatedDurationMs: 0,
-          }
-        );
+        return yearDays.get(year)?.get(label) ?? emptyPoint(label);
       }),
     })),
     rankings: {
-      artists: rankedArtists.slice(0, options.rankingLimit ?? 25),
-      albums: rankedAlbums.slice(0, options.rankingLimit ?? 25),
-      tracks: rankedTracks.slice(0, options.rankingLimit ?? 25),
+      artists: rankedArtists.items.slice(0, rankingLimit),
+      albums: rankedAlbums.items.slice(0, rankingLimit),
+      tracks: rankedTracks.items.slice(0, rankingLimit),
     },
     distributions: {
-      artists: distribution(rankedArtists, options.distributionLimit ?? 10),
-      albums: distribution(rankedAlbums, options.distributionLimit ?? 10),
+      artists: distribution(
+        rankedArtists.items,
+        artistDenominator,
+        distributionLimit,
+      ),
+      albums: distribution(
+        rankedAlbums.items,
+        albumDenominator,
+        distributionLimit,
+      ),
     },
     bucketDefinitions: {
       interval: '[from,to)' as const,

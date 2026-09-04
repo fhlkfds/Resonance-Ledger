@@ -5,6 +5,7 @@ import {
   type RangePreset,
   type ResolvedRange,
 } from '@/lib/stats/dates';
+import { retentionCutoff } from './retention-window';
 
 export const rangeFields = {
   range: z
@@ -30,7 +31,11 @@ export function normalizedRange(
     to?: string;
     tz?: string;
   },
-  settings: { timezone: string; weekStartsOn: number },
+  settings: {
+    timezone: string;
+    weekStartsOn: number;
+    retentionDays?: number;
+  },
   now = new Date(),
 ): ResolvedRange {
   if (input.range === 'CUSTOM' && (!input.from || !input.to))
@@ -46,7 +51,7 @@ export function normalizedRange(
       'Preset range cannot include from or to',
     );
   try {
-    return resolveRange({
+    const resolved = resolveRange({
       preset: input.range,
       timezone: input.tz ?? settings.timezone,
       now,
@@ -54,6 +59,16 @@ export function normalizedRange(
       ...(input.from ? { customFrom: input.from } : {}),
       ...(input.to ? { customTo: input.to } : {}),
     });
+    // ALL_TIME resolves to an open-ended interval. Left unbounded it means
+    // "scan everything ever stored", which is how one request could exhaust
+    // memory; and it is a promise the retention job has already broken, since
+    // anything past the cutoff is deleted. Bound it to the retained window.
+    if (resolved.from === null)
+      return {
+        ...resolved,
+        from: retentionCutoff(now, settings.retentionDays),
+      };
+    return resolved;
   } catch {
     throw new ProblemError(
       400,
