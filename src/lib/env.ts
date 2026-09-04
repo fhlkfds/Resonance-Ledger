@@ -46,6 +46,14 @@ export const environmentSchema = z
     SESSION_SECRET: base64Key,
     TOKEN_ENCRYPTION_KEY: base64Key,
     TOKEN_ENCRYPTION_KEY_VERSION: z.string().regex(/^v[1-9]\d*$/),
+    // §17 key rotation: the superseded key stays readable until the batch
+    // rotation job has re-encrypted every envelope under the active version.
+    // Both are optional, and must be supplied together.
+    TOKEN_ENCRYPTION_KEY_PREVIOUS: base64Key.optional(),
+    TOKEN_ENCRYPTION_KEY_PREVIOUS_VERSION: z
+      .string()
+      .regex(/^v[1-9]\d*$/)
+      .optional(),
     SYNC_INTERVAL_SECONDS: int(60, 900),
     SYNC_OVERLAP_SECONDS: int(60, 900).default(300),
     DATA_RETENTION_DAYS: int(1, 3650),
@@ -102,6 +110,38 @@ export const environmentSchema = z
         code: 'custom',
         path: ['SESSION_SECRET'],
         message: 'must differ from token encryption key',
+      });
+    }
+    const previousKey = environment.TOKEN_ENCRYPTION_KEY_PREVIOUS;
+    const previousVersion = environment.TOKEN_ENCRYPTION_KEY_PREVIOUS_VERSION;
+    // A key without its version, or a version without its key, silently
+    // disables rotation and bricks every envelope written under the old key.
+    if (Boolean(previousKey) !== Boolean(previousVersion)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          previousKey
+            ? 'TOKEN_ENCRYPTION_KEY_PREVIOUS_VERSION'
+            : 'TOKEN_ENCRYPTION_KEY_PREVIOUS',
+        ],
+        message: 'previous key and previous key version must be set together',
+      });
+    }
+    if (
+      previousVersion &&
+      previousVersion === environment.TOKEN_ENCRYPTION_KEY_VERSION
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TOKEN_ENCRYPTION_KEY_PREVIOUS_VERSION'],
+        message: 'must differ from TOKEN_ENCRYPTION_KEY_VERSION',
+      });
+    }
+    if (previousKey && previousKey === environment.TOKEN_ENCRYPTION_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['TOKEN_ENCRYPTION_KEY_PREVIOUS'],
+        message: 'must differ from TOKEN_ENCRYPTION_KEY',
       });
     }
     if (environment.SYNC_OVERLAP_SECONDS < environment.SYNC_INTERVAL_SECONDS) {

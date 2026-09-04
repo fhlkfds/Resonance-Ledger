@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:performance": "vitest run --config vitest.performance.config.ts",
     "db:generate": "prisma generate",
     "db:migrate:deploy": "prisma migrate deploy",
     "test:coverage": "vitest run --coverage",

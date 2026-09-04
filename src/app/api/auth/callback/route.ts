@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { encryptToken, tokenEnvelopeSchema } from '@/lib/crypto/token-envelope';
+import { activeTokenKey } from '@/lib/crypto/key-map';
 import { CONSENT_VERSION } from '@/lib/auth/consent';
 import {
   oauthCookieName,
@@ -79,7 +80,7 @@ export async function GET(request: Request): Promise<NextResponse> {
             where: { id: existing.userId },
           })
         : await createConsentedUser(database, now);
-    const key = Buffer.from(environment.TOKEN_ENCRYPTION_KEY, 'base64');
+    const key = activeTokenKey(environment);
     const accountId = existing?.id ?? crypto.randomUUID();
     const accessEnvelope = encryptToken(
       tokens.access_token,

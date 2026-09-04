@@ -26,8 +26,10 @@ import {
   recordSyncFailure,
 } from '@/lib/spotify/persist';
 import { syncLeasedAccount } from '@/worker/sync-account';
+import { rotateTokenKeys } from '@/worker/key-rotation';
 import { validAccessToken } from '@/lib/spotify/access-token';
 import { decryptToken, encryptToken } from '@/lib/crypto/token-envelope';
+import { tokenKeyMap } from '@/lib/crypto/key-map';
 import { parseEnvironment } from '@/lib/env';
 import { ApiRepository } from '@/lib/db/repositories/api';
 import { assertOwnedEntityFilters } from '@/lib/api/ownership';
@@ -1654,6 +1656,133 @@ describe('T-015/T-017 golden statistics', () => {
     expect(empty.rankings.artists).toEqual([]);
     expect(empty.distributions.artists.denominator).toBe(0);
     expect(empty.distributions.artists.items).toEqual([]);
+  });
+});
+
+describe('T-017 token key rotation (§17)', () => {
+  /**
+   * H6: rotating TOKEN_ENCRYPTION_KEY_VERSION does not move existing data --
+   * envelopes keep the version they were written under. Without a batch
+   * rotation job and a two-key decrypt map, advancing to v2 bricked every
+   * stored v1 envelope with a throw.
+   */
+  it('re-encrypts in bounded batches, idempotently, and stays readable throughout', async () => {
+    const oldKey = Buffer.alloc(32, 21);
+    const newKey = Buffer.alloc(32, 22);
+    const environment = parseEnvironment({
+      NODE_ENV: 'test',
+      APP_URL: 'https://listen.test',
+      PORT: '3000',
+      POSTGRES_DB: 'resonance',
+      POSTGRES_USER: 'resonance',
+      POSTGRES_PASSWORD: 'integration-database-password',
+      DATABASE_URL: 'postgresql://resonance:password@postgres:5432/resonance',
+      SPOTIFY_CLIENT_ID: 'client-id',
+      SPOTIFY_CLIENT_SECRET: 'integration-client-secret-long',
+      SPOTIFY_REDIRECT_URI: 'https://listen.test/api/auth/callback',
+      SESSION_SECRET: Buffer.alloc(32, 23).toString('base64'),
+      TOKEN_ENCRYPTION_KEY: newKey.toString('base64'),
+      TOKEN_ENCRYPTION_KEY_VERSION: 'v2',
+      TOKEN_ENCRYPTION_KEY_PREVIOUS: oldKey.toString('base64'),
+      TOKEN_ENCRYPTION_KEY_PREVIOUS_VERSION: 'v1',
+      SYNC_INTERVAL_SECONDS: '180',
+      SYNC_OVERLAP_SECONDS: '300',
+      DATA_RETENTION_DAYS: '730',
+      TRUST_PROXY: '1',
+      APP_VERSION: 'test',
+    });
+
+    // Three accounts still on v1.
+    const accountIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const user = await database.user.create({ data: { status: 'ACTIVE' } });
+      const accountId = crypto.randomUUID();
+      const far = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      await database.spotifyAccount.create({
+        data: {
+          id: accountId,
+          userId: user.id,
+          spotifyAccountId: `rotate-${index}`,
+          accessTokenEnvelope: encryptToken(
+            `access-${index}`,
+            { accountId, type: 'access', version: 'v1' },
+            oldKey,
+          ),
+          refreshTokenEnvelope: encryptToken(
+            `refresh-${index}`,
+            { accountId, type: 'refresh', version: 'v1' },
+            oldKey,
+          ),
+          accessTokenExpiresAt: far,
+          refreshTokenExpiresAt: far,
+          scopes: [],
+          syncState: { create: {} },
+        },
+      });
+      accountIds.push(accountId);
+    }
+
+    // A v1 envelope is readable before rotation: this is what makes the
+    // rotation window safe rather than an outage.
+    const before = await database.spotifyAccount.findUniqueOrThrow({
+      where: { id: accountIds[0]! },
+    });
+    expect(
+      decryptToken(
+        before.accessTokenEnvelope,
+        { accountId: accountIds[0]!, type: 'access' },
+        tokenKeyMap(environment),
+      ),
+    ).toBe('access-0');
+
+    // Bounded: two accounts per tick, so three accounts need two passes.
+    const first = await rotateTokenKeys(database, environment, {
+      batchSize: 2,
+    });
+    expect(first.rotated).toBe(2);
+    expect(first.failed).toBe(0);
+    expect(first.remaining).toBe(1);
+
+    const second = await rotateTokenKeys(database, environment, {
+      batchSize: 2,
+    });
+    expect(second.rotated).toBe(1);
+    expect(second.remaining).toBe(0);
+
+    // Idempotent: a further pass finds nothing and changes nothing.
+    const third = await rotateTokenKeys(database, environment, {
+      batchSize: 2,
+    });
+    expect(third).toMatchObject({ scanned: 0, rotated: 0, remaining: 0 });
+
+    // Every plaintext survived, and every envelope is now on v2 -- so the
+    // operator can safely remove the previous key.
+    const activeOnly = new Map([['v2', newKey]]);
+    for (const [index, accountId] of accountIds.entries()) {
+      const row = await database.spotifyAccount.findUniqueOrThrow({
+        where: { id: accountId },
+      });
+      expect((row.accessTokenEnvelope as { version: string }).version).toBe(
+        'v2',
+      );
+      expect((row.refreshTokenEnvelope as { version: string }).version).toBe(
+        'v2',
+      );
+      expect(
+        decryptToken(
+          row.accessTokenEnvelope,
+          { accountId, type: 'access' },
+          activeOnly,
+        ),
+      ).toBe(`access-${index}`);
+      expect(
+        decryptToken(
+          row.refreshTokenEnvelope,
+          { accountId, type: 'refresh' },
+          activeOnly,
+        ),
+      ).toBe(`refresh-${index}`);
+    }
   });
 });
 

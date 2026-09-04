@@ -97,6 +97,11 @@ export type Totals = {
   uniqueAlbums: number;
   uniqueArtists: number;
   artistPlayCredits: number;
+  /**
+   * Plays whose track carries an album. This is the album distribution's
+   * denominator, computed here so it costs no extra scan of the events.
+   */
+  albumPlayCredits: number;
 };
 
 /**
@@ -118,6 +123,7 @@ export async function totalsAggregate(
         duration: bigint;
         unique_tracks: bigint;
         unique_albums: bigint;
+        album_credits: bigint;
       }>
     >(Prisma.sql`
       WITH ${scoped}
@@ -125,7 +131,8 @@ export async function totalsAggregate(
         COUNT(*)::bigint AS plays,
         COALESCE(SUM(scoped.estimated_duration_ms), 0)::bigint AS duration,
         COUNT(DISTINCT scoped.track_id)::bigint AS unique_tracks,
-        COUNT(DISTINCT t.album_id)::bigint AS unique_albums
+        COUNT(DISTINCT t.album_id)::bigint AS unique_albums,
+        COUNT(t.album_id)::bigint AS album_credits
       FROM scoped
       LEFT JOIN tracks t ON t.id = scoped.track_id
     `),
@@ -147,6 +154,7 @@ export async function totalsAggregate(
     uniqueAlbums: num(base[0]?.unique_albums),
     uniqueArtists: num(credits[0]?.unique_artists),
     artistPlayCredits: num(credits[0]?.credits),
+    albumPlayCredits: num(base[0]?.album_credits),
   };
 }
 
@@ -174,39 +182,60 @@ export async function timeBuckets(
   return pointsByLabel(rows);
 }
 
+export type CalendarCell = {
+  weekday: number;
+  hour: number;
+  month: number;
+  plays: number;
+  estimatedDurationMs: number;
+};
+
 /**
- * One grouped row per calendar part. `part` is a closed enum, never user
- * input, and every result set here is at most 168 rows.
+ * One scan producing every calendar dimension at once.
+ *
+ * Grouping by (weekday, hour, month) yields at most 7 x 24 x 12 = 2016 rows,
+ * from which the hourly, weekday, hour-weekday, and month series are all
+ * derived by folding. Four separate GROUP BY queries meant four scans of the
+ * same events, which was the dominant cost of the statistics page at scale.
+ *
+ * Keys are numeric, never localised names: to_char('Day') follows the
+ * server's lc_time, so the caller maps 0..6 and 1..12 to names itself -- the
+ * same way the previous in-Node reduction used ZonedParts.weekday and .month.
  */
-export async function calendarBuckets(
+export async function calendarProfile(
   database: QueryClient,
   userId: string,
   range: ResolvedRange,
-  part: 'hour' | 'weekday' | 'month' | 'weekday_hour' | 'day',
   entity?: EntityScope,
-): Promise<Map<string, BucketPoint>> {
+): Promise<CalendarCell[]> {
   const scoped = scopedEventsCte(userId, range, entity);
   const local = localTimestamp(range.timezone);
-  // Numeric keys, never localised names: to_char('Day') follows the server's
-  // lc_time, so the caller maps 0..6 and 1..12 to names itself -- the same
-  // way the previous in-Node reduction used ZonedParts.weekday and .month.
-  const key = {
-    hour: Prisma.sql`to_char(${local}, 'HH24')`,
-    weekday: Prisma.sql`EXTRACT(DOW FROM ${local})::int::text`,
-    month: Prisma.sql`EXTRACT(MONTH FROM ${local})::int::text`,
-    weekday_hour: Prisma.sql`EXTRACT(DOW FROM ${local})::int::text || ':' || EXTRACT(HOUR FROM ${local})::int::text`,
-    day: Prisma.sql`to_char(${local}, 'YYYY-MM-DD')`,
-  }[part];
-  const rows = await database.$queryRaw<LabelledRow[]>(Prisma.sql`
+  const rows = await database.$queryRaw<
+    Array<{
+      weekday: number;
+      hour: number;
+      month: number;
+      plays: bigint;
+      duration: bigint;
+    }>
+  >(Prisma.sql`
     WITH ${scoped}
     SELECT
-      ${key} AS label,
+      EXTRACT(DOW FROM ${local})::int AS weekday,
+      EXTRACT(HOUR FROM ${local})::int AS hour,
+      EXTRACT(MONTH FROM ${local})::int AS month,
       COUNT(*)::bigint AS plays,
       COALESCE(SUM(scoped.estimated_duration_ms), 0)::bigint AS duration
     FROM scoped
-    GROUP BY 1
+    GROUP BY 1, 2, 3
   `);
-  return pointsByLabel(rows);
+  return rows.map((row) => ({
+    weekday: row.weekday,
+    hour: row.hour,
+    month: row.month,
+    plays: num(row.plays),
+    estimatedDurationMs: num(row.duration),
+  }));
 }
 
 /** The single busiest local day, decided entirely in SQL. */
@@ -354,24 +383,6 @@ export async function rankedEntityPage(
     })),
     hasMore: rows.length > limit,
   };
-}
-
-/** Total plays credited across all entities of a kind: the share denominator. */
-export async function distributionDenominator(
-  database: QueryClient,
-  userId: string,
-  range: ResolvedRange,
-  kind: EntityKind,
-  entity?: EntityScope,
-): Promise<number> {
-  const scoped = scopedEventsCte(userId, range, entity);
-  const rows = await database.$queryRaw<Array<{ total: bigint }>>(Prisma.sql`
-    WITH ${scoped}
-    SELECT COUNT(*)::bigint AS total
-    FROM scoped
-    ${ENTITY_JOIN[kind]}
-  `);
-  return num(rows[0]?.total);
 }
 
 /** 1-based rank of one entity within its kind, computed in the query. */

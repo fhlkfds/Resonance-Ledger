@@ -19,7 +19,12 @@ const banner = [
 ].join('');
 
 await build({
-  entryPoints: ['src/worker/index.ts', 'src/worker/healthcheck.ts'],
+  entryPoints: [
+    'src/worker/index.ts',
+    'src/worker/healthcheck.ts',
+    // Operator-run, one-shot; see docs/runbooks/token-key-rotation.md.
+    'src/worker/rotate-keys.ts',
+  ],
   outdir: 'dist/worker',
   outExtension: { '.js': '.mjs' },
   bundle: true,

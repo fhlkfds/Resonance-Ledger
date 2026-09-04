@@ -8,8 +8,7 @@ import {
   type ResolvedRange,
 } from './dates';
 import {
-  calendarBuckets,
-  distributionDenominator,
+  calendarProfile,
   playedAtBounds,
   rankedEntityPage,
   timeBuckets,
@@ -117,23 +116,15 @@ export async function analyticsData(
   const [
     totals,
     timePoints,
-    hourPoints,
-    weekdayPoints,
-    hourWeekdayPoints,
-    monthPoints,
+    calendar,
     bounds,
     rankedTracks,
     rankedAlbums,
     rankedArtists,
-    artistDenominator,
-    albumDenominator,
   ] = await Promise.all([
     totalsAggregate(database, userId, range, entity),
     timeBuckets(database, userId, range, granularity, weekStartsOn, entity),
-    calendarBuckets(database, userId, range, 'hour', entity),
-    calendarBuckets(database, userId, range, 'weekday', entity),
-    calendarBuckets(database, userId, range, 'weekday_hour', entity),
-    calendarBuckets(database, userId, range, 'month', entity),
+    calendarProfile(database, userId, range, entity),
     range.from
       ? Promise.resolve({ first: null, last: null })
       : playedAtBounds(database, userId, range, entity),
@@ -149,9 +140,43 @@ export async function analyticsData(
       limit: topLimit,
       ...(entity ? { entity } : {}),
     }),
-    distributionDenominator(database, userId, range, 'artist', entity),
-    distributionDenominator(database, userId, range, 'album', entity),
   ]);
+
+  // Fold the (weekday, hour, month) cells into the four calendar series.
+  const hourTotals = new Map<number, BucketPoint>();
+  const weekdayTotals = new Map<number, BucketPoint>();
+  const monthTotals = new Map<number, BucketPoint>();
+  const hourWeekdayTotals = new Map<string, BucketPoint>();
+  const accumulate = (
+    into: Map<string | number, BucketPoint>,
+    key: string | number,
+    label: string,
+    cell: (typeof calendar)[number],
+  ) => {
+    const point = into.get(key) ?? emptyPoint(label);
+    into.set(key, {
+      bucket: label,
+      plays: point.plays + cell.plays,
+      estimatedDurationMs: point.estimatedDurationMs + cell.estimatedDurationMs,
+    });
+  };
+  for (const cell of calendar) {
+    const hourLabel = cell.hour.toString().padStart(2, '0');
+    accumulate(hourTotals, cell.hour, hourLabel, cell);
+    accumulate(
+      weekdayTotals,
+      cell.weekday,
+      weekdayNames[cell.weekday] ?? '',
+      cell,
+    );
+    accumulate(monthTotals, cell.month, monthNames[cell.month - 1] ?? '', cell);
+    accumulate(
+      hourWeekdayTotals,
+      `${cell.weekday}:${cell.hour}`,
+      hourLabel,
+      cell,
+    );
+  }
 
   // Year-over-year. Without an explicit selection the years are those present
   // in the range; with one, each selected year is read over its full calendar
@@ -191,7 +216,17 @@ export async function analyticsData(
   const timeFrom = range.from ?? bounds.first;
 
   return {
-    totals,
+    // albumPlayCredits exists only to serve as the album distribution's
+    // denominator; it stays out of the response so the totals contract is
+    // unchanged.
+    totals: {
+      plays: totals.plays,
+      estimatedDurationMs: totals.estimatedDurationMs,
+      uniqueTracks: totals.uniqueTracks,
+      uniqueAlbums: totals.uniqueAlbums,
+      uniqueArtists: totals.uniqueArtists,
+      artistPlayCredits: totals.artistPlayCredits,
+    },
     time: timeFrom
       ? fillSeries(
           timePoints,
@@ -204,24 +239,21 @@ export async function analyticsData(
       : [],
     hourly: Array.from({ length: 24 }, (_, hour) => {
       const label = hour.toString().padStart(2, '0');
-      return hourPoints.get(label) ?? emptyPoint(label);
+      return hourTotals.get(hour) ?? emptyPoint(label);
     }),
     weekday: weekdayOrder.map((index) => {
       const name = weekdayNames[index]!;
-      const point = weekdayPoints.get(String(index));
-      return point ? { ...point, bucket: name } : emptyPoint(name);
+      return weekdayTotals.get(index) ?? emptyPoint(name);
     }),
     hourWeekday: weekdayOrder.map((index) => ({
       weekday: weekdayNames[index]!,
       points: Array.from({ length: 24 }, (_, hour) => {
         const label = hour.toString().padStart(2, '0');
-        const point = hourWeekdayPoints.get(`${index}:${hour}`);
-        return point ? { ...point, bucket: label } : emptyPoint(label);
+        return hourWeekdayTotals.get(`${index}:${hour}`) ?? emptyPoint(label);
       }),
     })),
     month: monthNames.map((name, index) => {
-      const point = monthPoints.get(String(index + 1));
-      return point ? { ...point, bucket: name } : emptyPoint(name);
+      return monthTotals.get(index + 1) ?? emptyPoint(name);
     }),
     yearOverYear: selectedYears.map((year) => ({
       year,
@@ -244,12 +276,12 @@ export async function analyticsData(
     distributions: {
       artists: distribution(
         rankedArtists.items,
-        artistDenominator,
+        totals.artistPlayCredits,
         distributionLimit,
       ),
       albums: distribution(
         rankedAlbums.items,
-        albumDenominator,
+        totals.albumPlayCredits,
         distributionLimit,
       ),
     },

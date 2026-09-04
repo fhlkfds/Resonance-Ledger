@@ -5,6 +5,7 @@ import {
   tokenEnvelopeSchema,
 } from '@/lib/crypto/token-envelope';
 import type { Environment } from '@/lib/env';
+import { tokenKeyMap } from '@/lib/crypto/key-map';
 import { InvalidGrantError, requestTokenRefresh } from './tokens';
 
 export async function validAccessToken(
@@ -13,12 +14,9 @@ export async function validAccessToken(
   environment: Environment,
   now = new Date(),
 ): Promise<string> {
-  const keys = new Map([
-    [
-      environment.TOKEN_ENCRYPTION_KEY_VERSION,
-      Buffer.from(environment.TOKEN_ENCRYPTION_KEY, 'base64'),
-    ],
-  ]);
+  // Both the active and the superseded key, so a rotation in progress does
+  // not brick accounts whose envelopes have not been re-encrypted yet.
+  const keys = tokenKeyMap(environment);
   const result = await database.$transaction(
     async (transaction) => {
       await transaction.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${accountId}, 0))`;

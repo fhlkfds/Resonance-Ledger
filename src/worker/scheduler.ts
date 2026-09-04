@@ -6,6 +6,7 @@ import { logger } from '@/lib/observability/logger';
 import { runRetention } from './retention';
 import { syncLeasedAccount } from './sync-account';
 import { refreshMetadata } from './metadata-refresh';
+import { rotateTokenKeys } from './key-rotation';
 
 /** Retention runs once a day; the tick loop just checks whether it is due. */
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -21,6 +22,7 @@ export async function runScheduler(
   // without waiting a full day.
   let retentionDueAt = Date.now();
   let metadataDueAt = Date.now();
+  let keyRotationComplete = false;
 
   while (!signal.aborted) {
     if (Date.now() >= retentionDueAt) {
@@ -55,6 +57,25 @@ export async function runScheduler(
         );
       }
       metadataDueAt = Date.now() + METADATA_INTERVAL_MS;
+    }
+
+    // Token key rotation (§17) only has work to do while a previous key is
+    // configured, and it is bounded to one small batch per tick so it cannot
+    // starve synchronization. Once no envelopes remain the operator removes
+    // the previous key and this stops running.
+    if (environment.TOKEN_ENCRYPTION_KEY_PREVIOUS && !keyRotationComplete) {
+      try {
+        const summary = await rotateTokenKeys(database, environment);
+        keyRotationComplete = summary.remaining === 0;
+      } catch (error) {
+        logger.error(
+          {
+            event: 'token_key_rotation.failed',
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'token key rotation pass failed and will be retried',
+        );
+      }
     }
 
     const lease = await leaseNextDueAccount(database, workerId);
