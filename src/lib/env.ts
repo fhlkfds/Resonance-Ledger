@@ -36,6 +36,10 @@ export const environmentSchema = z
     POSTGRES_USER: z.string().min(1),
     POSTGRES_PASSWORD: z.string().min(24),
     DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    // Bound the pool and cap statement runtime (spec §18). Applied to the
+    // connection string by src/lib/db/client.ts.
+    DATABASE_POOL_SIZE: int(1, 100).default(10),
+    DATABASE_STATEMENT_TIMEOUT_MS: int(1_000, 120_000).default(10_000),
     SPOTIFY_CLIENT_ID: z.string().min(8),
     SPOTIFY_CLIENT_SECRET: z.string().min(24),
     SPOTIFY_REDIRECT_URI: z.url(),

@@ -8,6 +8,7 @@ import {
 import { normalizedRange } from '@/lib/api/ranges';
 import { validateCsrfToken, validateSameOrigin } from '@/lib/auth/csrf';
 import { hashSecret } from '@/lib/auth/oauth-state';
+import { databaseUrlWithLimits } from '@/lib/db/client';
 import { neutralizeCsvFormula } from '@/app/api/export/route';
 import {
   addLocalDays,
@@ -120,4 +121,62 @@ describe('state-changing request controls', () => {
       expect(neutralizeCsvFormula(value)).toBe(`'${value}`);
     },
   );
+});
+
+/**
+ * H5/M9 (§18): without a bounded pool Prisma sizes it from the CPU count, and
+ * without a statement_timeout one heavy query holds its connection until the
+ * server gives up -- which is how a single authenticated request became a
+ * denial of service.
+ */
+describe('database connection limits', () => {
+  const url = 'postgresql://resonance:secret@postgres:5432/resonance';
+
+  it('applies a bounded pool and a statement timeout by default', () => {
+    const applied = new URL(databaseUrlWithLimits(url, {}));
+    expect(applied.searchParams.get('connection_limit')).toBe('10');
+    expect(applied.searchParams.get('pool_timeout')).toBe('10');
+    expect(applied.searchParams.get('options')).toBe(
+      '-c statement_timeout=10000',
+    );
+  });
+
+  it('honours operator overrides', () => {
+    const applied = new URL(
+      databaseUrlWithLimits(url, {
+        DATABASE_POOL_SIZE: '4',
+        DATABASE_STATEMENT_TIMEOUT_MS: '2500',
+      }),
+    );
+    expect(applied.searchParams.get('connection_limit')).toBe('4');
+    expect(applied.searchParams.get('options')).toBe(
+      '-c statement_timeout=2500',
+    );
+  });
+
+  it('never overwrites a value the operator already set in the URL', () => {
+    const applied = new URL(
+      databaseUrlWithLimits(
+        `${url}?connection_limit=25&options=-c%20statement_timeout%3D1000`,
+        {},
+      ),
+    );
+    expect(applied.searchParams.get('connection_limit')).toBe('25');
+    expect(applied.searchParams.get('options')).toBe(
+      '-c statement_timeout=1000',
+    );
+  });
+
+  it('falls back to the defaults on a nonsense value', () => {
+    const applied = new URL(
+      databaseUrlWithLimits(url, {
+        DATABASE_POOL_SIZE: 'lots',
+        DATABASE_STATEMENT_TIMEOUT_MS: '-1',
+      }),
+    );
+    expect(applied.searchParams.get('connection_limit')).toBe('10');
+    expect(applied.searchParams.get('options')).toBe(
+      '-c statement_timeout=10000',
+    );
+  });
 });

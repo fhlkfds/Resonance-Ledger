@@ -39,6 +39,7 @@ import { runRetention } from '@/worker/retention';
 import { resolveRange } from '@/lib/stats/dates';
 import { enforceRateLimit } from '@/lib/api/rate-limit';
 import { disconnectUser } from '@/lib/db/repositories/disconnect';
+import { databaseUrlWithLimits } from '@/lib/db/client';
 import { spotifyItem } from '../fixtures/spotify';
 
 let container: StartedPostgreSqlContainer;
@@ -119,6 +120,32 @@ describe('initial PostgreSQL migration', () => {
         },
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe('connection limits (§18)', () => {
+  /**
+   * H5/M9: a statement_timeout is what stops one heavy read from holding a
+   * connection until the server gives up. Asserting the setting reached
+   * PostgreSQL also pins the `options` passthrough we rely on.
+   */
+  it('enforces the configured statement_timeout on a real connection', async () => {
+    const url = databaseUrlWithLimits(container.getConnectionUri(), {
+      DATABASE_STATEMENT_TIMEOUT_MS: '2500',
+      DATABASE_POOL_SIZE: '4',
+    });
+    const client = new PrismaClient({ datasources: { db: { url } } });
+    try {
+      const shown = await client.$queryRaw<
+        Array<{ statement_timeout: string }>
+      >`SHOW statement_timeout`;
+      // PostgreSQL echoes the setting back in its own units.
+      expect(shown[0]!.statement_timeout).toBe('2500ms');
+      // And it is actually enforced, not merely reported.
+      await expect(client.$queryRaw`SELECT pg_sleep(5)`).rejects.toThrow();
+    } finally {
+      await client.$disconnect();
+    }
   });
 });
 
