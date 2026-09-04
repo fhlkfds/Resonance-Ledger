@@ -117,9 +117,13 @@ export function timeZoneOffsetMs(instant: Date, timezone: string): number {
 /**
  * Convert local wall-clock fields to the UTC instant they denote.
  *
- * During a spring-forward gap the nominal time does not exist; the result
- * lands on the instant the clock jumps to. During a fall-back overlap the
- * earlier of the two candidate instants is chosen. Both are deterministic.
+ * Two cases are ambiguous and both resolve deterministically:
+ *
+ * - Fall-back overlap, where the wall-clock time occurs twice. The earlier
+ *   instant (still on the pre-transition offset) is chosen.
+ * - Spring-forward gap, where the wall-clock time never occurs. Neither
+ *   candidate round-trips, so the time is shifted forward by the gap, which
+ *   matches the convention used by Temporal, java.time, and moment-timezone.
  */
 export function zonedPartsToUtc(
   timezone: string,
@@ -135,7 +139,11 @@ export function zonedPartsToUtc(
   const firstGuess = nominal - firstOffset;
   const secondOffset = timeZoneOffsetMs(new Date(firstGuess), timezone);
   if (secondOffset === firstOffset) return new Date(firstGuess);
-  return new Date(nominal - secondOffset);
+
+  const secondGuess = nominal - secondOffset;
+  if (timeZoneOffsetMs(new Date(secondGuess), timezone) === secondOffset)
+    return new Date(secondGuess);
+  return new Date(firstGuess);
 }
 
 /** Local midnight starting the day that contains `instant`. */

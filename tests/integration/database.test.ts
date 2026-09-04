@@ -29,6 +29,8 @@ import { assertOwnedEntityFilters } from '@/lib/api/ownership';
 import { decodeCursor, encodeCursor } from '@/lib/api/pagination';
 import { dashboardData, rankedEntities } from '@/lib/stats/queries';
 import { entityDetailData } from '@/lib/stats/entity-details';
+import { analyticsData } from '@/lib/stats/analytics';
+import { resolveRange } from '@/lib/stats/dates';
 import { enforceRateLimit } from '@/lib/api/rate-limit';
 import { spotifyItem } from '../fixtures/spotify';
 
@@ -950,5 +952,253 @@ describe('entity detail analytics', () => {
     await expect(
       entityDetailData(database, stranger.id, range, 1, 'track', track.id),
     ).resolves.toBeNull();
+  });
+});
+
+describe('T-015/T-017 golden statistics', () => {
+  it('matches hand-calculated totals, credits, ties, and DST buckets', async () => {
+    // Fixture designed so every number below can be verified by hand.
+    //
+    // Timezone: America/New_York, week starts Monday.
+    // Plays (all local times on 2026-03-07 and 2026-03-08, the DST weekend):
+    //   1. 2026-03-07 10:00 EST  Alpha  (Ada + Bo)      120000 ms
+    //   2. 2026-03-07 11:00 EST  Alpha  (Ada + Bo)      120000 ms
+    //   3. 2026-03-07 12:00 EST  Bravo  (Ada)           180000 ms
+    //   4. 2026-03-08 03:30 EDT  Charlie (Bo)           180000 ms
+    //
+    // Expected: 4 plays, 600000 ms, 3 unique tracks, 1 unique album (Charlie
+    // has none), 2 unique artists, 6 artist play credits (2+2 for Alpha,
+    // 1 for Bravo, 1 for Charlie => Ada 3, Bo 3).
+    const user = await database.user.create({
+      data: {
+        status: 'ACTIVE',
+        settings: {
+          create: { timezone: 'America/New_York', weekStartsOn: 1 },
+        },
+      },
+    });
+    const envelope = {
+      version: 'v1',
+      ciphertext: 'fixture',
+      nonce: 'fixture',
+      tag: 'fixture',
+    };
+    const expiry = new Date('2027-09-03T00:00:00Z');
+    const account = await database.spotifyAccount.create({
+      data: {
+        userId: user.id,
+        spotifyAccountId: 'golden-account',
+        accessTokenEnvelope: envelope,
+        refreshTokenEnvelope: envelope,
+        accessTokenExpiresAt: expiry,
+        refreshTokenExpiresAt: expiry,
+        scopes: [],
+      },
+    });
+
+    const [ada, bo] = await Promise.all([
+      database.artist.create({
+        data: {
+          externalKey: 'spotify:golden-ada',
+          spotifyId: 'golden-ada',
+          name: 'Ada',
+          normalizedName: 'ada',
+          metadataFetchedAt: new Date(),
+        },
+      }),
+      database.artist.create({
+        data: {
+          externalKey: 'spotify:golden-bo',
+          spotifyId: 'golden-bo',
+          name: 'Bo',
+          normalizedName: 'bo',
+          metadataFetchedAt: new Date(),
+        },
+      }),
+    ]);
+    const album = await database.album.create({
+      data: {
+        externalKey: 'spotify:golden-album',
+        spotifyId: 'golden-album',
+        name: 'Golden',
+        normalizedName: 'golden',
+        metadataFetchedAt: new Date(),
+      },
+    });
+    const [alpha, bravo, charlie] = await Promise.all([
+      database.track.create({
+        data: {
+          externalKey: 'spotify:golden-alpha',
+          spotifyId: 'golden-alpha',
+          name: 'Alpha',
+          normalizedName: 'alpha',
+          durationMs: 120_000,
+          albumId: album.id,
+          metadataFetchedAt: new Date(),
+          artists: {
+            create: [
+              { artistId: ada.id, position: 0 },
+              { artistId: bo.id, position: 1 },
+            ],
+          },
+        },
+      }),
+      database.track.create({
+        data: {
+          externalKey: 'spotify:golden-bravo',
+          spotifyId: 'golden-bravo',
+          name: 'Bravo',
+          normalizedName: 'bravo',
+          durationMs: 180_000,
+          albumId: album.id,
+          metadataFetchedAt: new Date(),
+          artists: { create: [{ artistId: ada.id, position: 0 }] },
+        },
+      }),
+      database.track.create({
+        data: {
+          externalKey: 'spotify:golden-charlie',
+          spotifyId: 'golden-charlie',
+          name: 'Charlie',
+          normalizedName: 'charlie',
+          durationMs: 180_000,
+          metadataFetchedAt: new Date(),
+          artists: { create: [{ artistId: bo.id, position: 0 }] },
+        },
+      }),
+    ]);
+
+    await database.listeningHistory.createMany({
+      data: [
+        {
+          spotifyAccountId: account.id,
+          trackId: alpha.id,
+          playedAt: new Date('2026-03-07T15:00:00Z'),
+          estimatedDurationMs: 120_000,
+        },
+        {
+          spotifyAccountId: account.id,
+          trackId: alpha.id,
+          playedAt: new Date('2026-03-07T16:00:00Z'),
+          estimatedDurationMs: 120_000,
+        },
+        {
+          spotifyAccountId: account.id,
+          trackId: bravo.id,
+          playedAt: new Date('2026-03-07T17:00:00Z'),
+          estimatedDurationMs: 180_000,
+        },
+        {
+          spotifyAccountId: account.id,
+          trackId: charlie.id,
+          playedAt: new Date('2026-03-08T07:30:00Z'),
+          estimatedDurationMs: 180_000,
+        },
+      ],
+    });
+
+    const range = resolveRange({
+      preset: 'CUSTOM',
+      timezone: 'America/New_York',
+      weekStartsOn: 1,
+      now: new Date('2026-03-10T12:00:00Z'),
+      customFrom: '2026-03-07',
+      customTo: '2026-03-08',
+    });
+    const result = await analyticsData(database, user.id, range, 1, {
+      rankingLimit: 10,
+      distributionLimit: 5,
+    });
+
+    expect(result.totals).toEqual({
+      plays: 4,
+      estimatedDurationMs: 600_000,
+      uniqueTracks: 3,
+      uniqueAlbums: 1,
+      uniqueArtists: 2,
+      artistPlayCredits: 6,
+    });
+
+    // Ada and Bo tie on 3 credits each. Tie-break is estimated duration desc
+    // (Ada 120+120+180 = 420000, Bo 120+120+180 = 420000), then normalized
+    // name ascending, so "ada" precedes "bo".
+    expect(
+      result.rankings.artists.map((entry) => [entry.name, entry.plays]),
+    ).toEqual([
+      ['Ada', 3],
+      ['Bo', 3],
+    ]);
+    expect(result.rankings.artists[0]!.estimatedDurationMs).toBe(420_000);
+
+    // Alpha has 2 plays; Bravo and Charlie tie at 1 play and 180000 ms, so
+    // the normalized name decides: "bravo" before "charlie".
+    expect(
+      result.rankings.tracks.map((entry) => [entry.name, entry.plays]),
+    ).toEqual([
+      ['Alpha', 2],
+      ['Bravo', 1],
+      ['Charlie', 1],
+    ]);
+
+    // Day buckets span the 23-hour spring-forward day without gaps.
+    expect(result.bucketDefinitions.granularity).toBe('day');
+    expect(result.time.map((point) => [point.bucket, point.plays])).toEqual([
+      ['2026-03-07', 3],
+      ['2026-03-08', 1],
+    ]);
+
+    // The 03:30 EDT play lands in local hour 3, not the UTC hour 7.
+    expect(result.hourly).toHaveLength(24);
+    expect(result.hourly[3]).toEqual({
+      bucket: '03',
+      plays: 1,
+      estimatedDurationMs: 180_000,
+    });
+    expect(result.hourly.reduce((sum, point) => sum + point.plays, 0)).toBe(4);
+
+    // Weekday buckets start on Monday and sum to the range total.
+    expect(result.weekday).toHaveLength(7);
+    expect(result.weekday[0]!.bucket).toBe('Monday');
+    expect(result.weekday.reduce((sum, point) => sum + point.plays, 0)).toBe(4);
+    expect(
+      result.weekday.find((point) => point.bucket === 'Saturday')!.plays,
+    ).toBe(3);
+    expect(
+      result.weekday.find((point) => point.bucket === 'Sunday')!.plays,
+    ).toBe(1);
+
+    // Artist credits (6) are the distribution denominator, not plays (4).
+    expect(result.distributions.artists.denominator).toBe(6);
+    // Only Alpha and Bravo carry an album, so 3 of 4 plays have one.
+    expect(result.distributions.albums.denominator).toBe(3);
+
+    // T-017: an empty range returns zeroed totals and zero-filled series.
+    const emptyRange = resolveRange({
+      preset: 'CUSTOM',
+      timezone: 'America/New_York',
+      weekStartsOn: 1,
+      now: new Date('2026-03-10T12:00:00Z'),
+      customFrom: '2026-01-01',
+      customTo: '2026-01-02',
+    });
+    const empty = await analyticsData(database, user.id, emptyRange, 1);
+    expect(empty.totals).toEqual({
+      plays: 0,
+      estimatedDurationMs: 0,
+      uniqueTracks: 0,
+      uniqueAlbums: 0,
+      uniqueArtists: 0,
+      artistPlayCredits: 0,
+    });
+    expect(empty.time.map((point) => point.bucket)).toEqual([
+      '2026-01-01',
+      '2026-01-02',
+    ]);
+    expect(empty.time.every((point) => point.plays === 0)).toBe(true);
+    expect(empty.hourly).toHaveLength(24);
+    expect(empty.weekday).toHaveLength(7);
+    expect(empty.rankings.artists).toEqual([]);
+    expect(empty.distributions.artists.denominator).toBe(0);
+    expect(empty.distributions.artists.items).toEqual([]);
   });
 });

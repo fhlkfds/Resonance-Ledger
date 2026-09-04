@@ -5,6 +5,7 @@ import { requireSession } from '@/lib/auth/request-session';
 import { database } from '@/lib/db/client';
 import { resolveRange, type RangePreset } from '@/lib/stats/dates';
 import { dashboardData } from '@/lib/stats/queries';
+import { ESTIMATE_CAVEAT, formatDuration } from '@/lib/format';
 
 const validRanges = new Set<RangePreset>([
   'TODAY',
@@ -14,12 +15,6 @@ const validRanges = new Set<RangePreset>([
   'CURRENT_YEAR',
   'ALL_TIME',
 ]);
-
-function duration(milliseconds: number): string {
-  const hours = Math.floor(milliseconds / 3_600_000);
-  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
-  return hours ? `${hours.toLocaleString()}h ${minutes}m` : `${minutes}m`;
-}
 
 export default async function DashboardPage({
   searchParams,
@@ -112,8 +107,8 @@ export default async function DashboardPage({
       >
         <KpiCard
           label="Estimated listening time"
-          value={duration(data.totals.estimatedDurationMs)}
-          hint="Spotify provides no actual played milliseconds. This estimate sums each track's full duration."
+          value={formatDuration(data.totals.estimatedDurationMs)}
+          hint={ESTIMATE_CAVEAT}
         />
         <KpiCard
           label="Total plays"
@@ -168,7 +163,7 @@ export default async function DashboardPage({
               </h2>
               <p className="mt-1 text-sm text-muted">
                 {data.mostActiveDay?.plays} plays ·{' '}
-                {duration(data.mostActiveDay?.estimatedDurationMs ?? 0)}{' '}
+                {formatDuration(data.mostActiveDay?.estimatedDurationMs ?? 0)}{' '}
                 estimated
               </p>
             </article>
