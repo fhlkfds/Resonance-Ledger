@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { accountsOrigin } from './endpoints';
 
 const refreshResponseSchema = z.object({
   access_token: z.string().min(1),
@@ -22,7 +23,7 @@ export async function requestTokenRefresh(input: {
   fetcher?: typeof fetch;
 }) {
   const response = await (input.fetcher ?? fetch)(
-    'https://accounts.spotify.com/api/token',
+    `${accountsOrigin()}/api/token`,
     {
       method: 'POST',
       headers: {

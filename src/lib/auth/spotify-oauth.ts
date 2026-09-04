@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { accountsOrigin, apiOrigin } from '@/lib/spotify/endpoints';
 
 export const SPOTIFY_SCOPES = [
   'user-read-recently-played',
@@ -28,7 +29,7 @@ export function spotifyAuthorizationUrl(input: {
   redirectUri: string;
   state: string;
 }): URL {
-  const url = new URL('https://accounts.spotify.com/authorize');
+  const url = new URL(`${accountsOrigin()}/authorize`);
   url.search = new URLSearchParams({
     response_type: 'code',
     client_id: input.clientId,
@@ -54,7 +55,7 @@ export async function exchangeAuthorizationCode(input: {
   fetcher?: typeof fetch;
 }): Promise<SpotifyTokenResponse> {
   const fetcher = input.fetcher ?? fetch;
-  const response = await fetcher('https://accounts.spotify.com/api/token', {
+  const response = await fetcher(`${accountsOrigin()}/api/token`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString('base64')}`,
@@ -78,7 +79,7 @@ export async function fetchSpotifyProfile(
   accessToken: string,
   fetcher: typeof fetch = fetch,
 ): Promise<SpotifyProfile> {
-  const response = await fetcher('https://api.spotify.com/v1/me', {
+  const response = await fetcher(`${apiOrigin()}/v1/me`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'User-Agent': 'Resonance-Ledger/0.1',

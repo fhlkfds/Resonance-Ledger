@@ -38,6 +38,7 @@
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@playwright/test": "1.57.0",
     "@testcontainers/postgresql": "12.1.0",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.3",

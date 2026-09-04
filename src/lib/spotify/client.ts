@@ -1,6 +1,8 @@
 import { recentlyPlayedPageSchemaV1, type SpotifyPlayedItem } from './schemas';
 
-const API_ORIGIN = 'https://api.spotify.com';
+import { apiOrigin } from './endpoints';
+
+const API_ORIGIN = apiOrigin();
 const MAX_ATTEMPTS = 5;
 
 export class SpotifyHttpError extends Error {
